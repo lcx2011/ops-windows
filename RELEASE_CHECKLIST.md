@@ -78,6 +78,8 @@
 - [ ] 对外分发包已使用 Developer ID 签名、提交公证并完成 Gatekeeper 验证。
 - [ ] Windows 10/11 使用完整项目目录解压运行，`start-windows.cmd` 能启动并复用本地浏览器。
 - [ ] Windows 已验证 Python 3.9+、`requirements-windows.txt` 安装、LocalAppData 数据目录 ACL，以及服务/任务的启动、停止、重启和日志。
+- [ ] Windows 桌面目录已用 `requirements-desktop-windows.txt` 与 `requirements-build-windows.txt` 构建；`LocalOps.exe` 在 WebView2 Runtime 可用的 Windows 10/11 上无 Terminal 启动，窗口重启/关闭和子服务生命周期均已人工验收。
+- [ ] PyInstaller 生成的 `dist\\LocalOps\\LocalOps.exe` 与 `_internal` 目录保持完整，未把开发工作区、用户配置、日志或构建缓存复制进交付目录。
 - [ ] Windows 进程树停止不会误杀其他用户或其他卡片的进程；缺失 `psutil` 时降级提示可理解。
 
 ## 7. 许可、隐私与发行包内容

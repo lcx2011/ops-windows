@@ -31,7 +31,7 @@
 
 - macOS 12 或更高版本（随项目启动器使用 Python 3.12+），或 Windows 10/11（Python 3.9+）。
 - Windows 推荐安装 `requirements-windows.txt` 中的 `psutil`，用于更完整的进程、端口和工作目录监控。
-- Safari、Chrome 或其他支持 ES Modules 的现代浏览器。
+- 浏览器模式需要 Safari、Chrome 或其他支持 ES Modules 的现代浏览器；Windows 桌面模式使用 WebView2 原生窗口。
 
 `VERSION` 是项目版本的唯一权威来源。`Info.plist`、发行包名和发行说明应与它保持一致。
 
@@ -57,25 +57,28 @@
 
      之后即可正常双击。这是 macOS 对互联网下载应用的常规隔离提示，不是程序损坏。
 
-Windows 首次准备：安装 Python 3.9 或更高版本后，可在 PowerShell 中执行：
+Windows 源码模式首次准备：安装 Python 3.9 或更高版本后，可在 PowerShell 中执行：
 
 ```powershell
 py -3 -m pip install -r requirements-windows.txt
+py -3 -m pip install -r requirements-desktop-windows.txt
 ```
 
 `psutil` 是增强监控依赖；未安装时仍可启动，但部分 Windows 进程信息会进入保守降级模式。
 
 ## 运行
 
-启动总控台有且只有三种方式，效果相同，按习惯选择：
+启动总控台有以下方式，按使用场景选择：
 
 | 方式 | 操作 | 适用场景 |
 | --- | --- | --- |
 | 双击应用 | 双击 `总控台.app` | 日常使用。后台运行，无 Terminal 窗口和 Dock 图标 |
 | 双击脚本 | 双击 `start.command` | 想在 Terminal 里看实时输出 |
 | 命令行 | `python3 server.py` | 调试、脚本化或远程 SSH 启动 |
+| Windows 桌面应用 | 运行打包后的 `dist\\LocalOps\\LocalOps.exe` | 原生窗口，无浏览器标签页和 Terminal |
+| Windows 源码桌面模式 | 双击 `start-desktop.cmd` | 本地开发或未打包运行 |
 
-Windows 使用 `start-windows.cmd` 双击启动，或在 PowerShell 中运行：
+Windows 浏览器模式使用 `start-windows.cmd` 双击启动，或在 PowerShell 中运行：
 
 ```powershell
 py -3 server.py
@@ -95,6 +98,19 @@ python3 server.py --preferred-port 9603  # 在 9600-9609 内指定优先端口
 **实际地址在哪里看**：顶栏「重启 :9600」按钮上直接显示当前端口；或看终端输出、macOS 的 `~/Library/Logs/总控台/console.log`、Windows 的 `%LOCALAPPDATA%\总控台\logs\console.log`。浏览器手动访问 `http://127.0.0.1:端口号/` 即可。
 
 **停止与重启**：顶栏「重启 / 停止」控制的是总控台自身（网页服务）。停止总控台**不会**停止启动台里已经运行的应用——它们是独立进程组，会继续运行；下次打开总控台时会自动重新识别。重启总控台会加载磁盘上的最新代码，同样不影响运行中的应用。
+
+### Windows 桌面应用
+
+桌面模式不是简单打开浏览器的快捷方式：`desktop_app.py` 在同一进程中托管本地 API，使用 pywebview/WebView2 创建原生窗口，窗口关闭时自动收尾总控台；启动台里的业务进程仍保持独立，不会被误停。
+
+源码运行需要先安装 `requirements-desktop-windows.txt`。构建独立目录应用需要额外安装构建依赖，然后执行：
+
+```powershell
+py -3 -m pip install -r requirements-build-windows.txt
+build-desktop-windows.cmd
+```
+
+构建结果为 `dist\\LocalOps\\LocalOps.exe` 及其 `_internal` 目录，运行时需要保持整个目录结构。Windows 10/11 通常已提供 WebView2 Runtime；如果窗口无法创建，请先安装系统 WebView2 Runtime。
 
 ## 使用
 

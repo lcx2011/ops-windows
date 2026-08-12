@@ -117,6 +117,11 @@ let pollController = null;
 let pollTimer = null;
 let restartDeadlineTimer = null;
 
+function consoleRestartKey(data) {
+  if (!data) return null;
+  return data.consoleInstanceId || data.consolePid || null;
+}
+
 function poll(force = false) {
   if (document.hidden && !force) return Promise.resolve();
   if (pollPromise) return pollPromise;
@@ -155,8 +160,9 @@ function poll(force = false) {
       notifyTaskCompletions(state.data, data);
       state.data = data;
       state.lastUpdate = new Date();
-      const restartCompleted = state.restartingFrom && data.consolePid
-        && data.consolePid !== state.restartingFrom;
+      const restartCompleted = state.restartingFrom
+        && consoleRestartKey(data)
+        && consoleRestartKey(data) !== state.restartingFrom;
       if (restartCompleted) {
         clearTimeout(restartDeadlineTimer);
         restartDeadlineTimer = null;
@@ -312,7 +318,7 @@ restartConsoleBtn.addEventListener('click', () => {
     tone: 'primary',
     onOk: async () => {
       suspendPortDiscovery();
-      state.restartingFrom = consolePid;
+      state.restartingFrom = consoleRestartKey(state.data);
       banner.textContent = '总控台正在重新启动，页面会自动恢复…';
       banner.classList.add('show');
       banner.setAttribute('aria-hidden', 'false');

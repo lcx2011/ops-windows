@@ -45,8 +45,12 @@ INCLUDE = (
     *REQUIRED_LICENSES,
     "server.py",
     "platform_support.py",
+    "desktop_app.py",
     "start.command",
     "start-windows.cmd",
+    "start-desktop.cmd",
+    "build-desktop-windows.cmd",
+    "desktop-app.spec",
     "总控台.app",
     "static",
     "docs",
@@ -54,6 +58,8 @@ INCLUDE = (
     "tools",
     "requirements-dev.txt",
     "requirements-windows.txt",
+    "requirements-desktop-windows.txt",
+    "requirements-build-windows.txt",
     "Makefile",
 )
 EXCLUDED_PARTS = {
@@ -109,6 +115,8 @@ SAFE_ENV_SUFFIXES = {".example", ".sample", ".template"}
 EXECUTABLE_FILES = {
     "start.command",
     "start-windows.cmd",
+    "start-desktop.cmd",
+    "build-desktop-windows.cmd",
     "tools/build_release.py",
     "总控台.app/Contents/MacOS/launcher",
 }

@@ -26,7 +26,9 @@ data/
 # Generated scratch and release artifacts
 tmp/
 build/
+build-desktop-*/
 dist/
+dist-desktop-*/
 release/
 *.zip
 *.tar.gz

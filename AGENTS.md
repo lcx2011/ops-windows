@@ -1,10 +1,11 @@
 # 总控台 (Console)
 
-本地服务监控与快速启动控制台：macOS 使用 Python 标准库后端，Windows 推荐使用 `psutil` 增强进程监控；前端无构建、无 CDN。推荐双击 `总控台.app`（macOS）或 `start-windows.cmd`（Windows）启动；`start.command` 保留为 macOS 终端调试入口。
+本地服务监控与快速启动控制台：macOS 使用 Python 标准库后端，Windows 推荐使用 `psutil` 增强进程监控；前端无构建、无 CDN。Windows 桌面模式由 `desktop_app.py` 使用 pywebview/WebView2 托管，`start-desktop.cmd` 是源码桌面入口，`dist\\LocalOps\\LocalOps.exe` 是 PyInstaller 构建结果。浏览器模式仍由 `start-windows.cmd` 提供；`start.command` 保留为 macOS 终端调试入口。
 
 ## 结构
 
 - `server.py` — 产品后端与 HTTP API（Python 3.9+；macOS 启动器要求 3.12+）
+- `desktop_app.py` — Windows 原生窗口宿主；后端生命周期、桌面重启/停止动作与 WebView2 窗口管理
 - `platform_support.py` — Windows 进程/端口/cwd、Job Object、实例锁、命令包装与生命周期适配层
 - `static/index.html` / `static/app.js`（入口）/ `static/js/{core,launchpad,services,overlays,ports,widgets}.js`（原生 ES Modules，无构建）/ `static/icons.js` — 前端（原生，禁框架/CDN/构建）；`core.js` 承载工具/API/浮层/状态/主题注册，`launchpad.js` 卡片+拖拽+诊断+启动台 KPI/分区过滤，`services.js` 表格+监控 KPI 火花线，`overlays.js` 模态+抽屉，`ports.js` 端口归一化纯函数，`widgets.js` 右侧信息栏（实时动态/告警、TOP5、小贴士、快捷操作）与导航轨状态；模块间用 `window.__poll` 共享轮询入口
 - 布局 v2：左侧 `.rail` 图标导航轨（启动台/服务监控视图切换 + 日志中心/设置中心弹层入口）+ 顶栏 + 内容/右侧信息栏双栏网格（≤1280px 侧栏下沉到底部、≤900px 导航轨隐藏）；结构样式集中在 `static/base.css` 末尾「布局 v2」段（主题令牌驱动），主题包负责视觉皮肤
@@ -16,6 +17,9 @@
 - `data/` — 旧版项目内数据，仅在新目标不存在的首次启动中复制迁移；保留不删除
 - `start.command` — macOS 双击启动脚本（chmod +x）
 - `start-windows.cmd` — Windows 双击启动脚本
+- `start-desktop.cmd` — Windows 源码桌面启动脚本
+- `build-desktop-windows.cmd` / `desktop-app.spec` — Windows PyInstaller 构建入口与配置
+- `requirements-desktop-windows.txt` / `requirements-build-windows.txt` — 桌面运行依赖与构建依赖
 - `总控台.app` — macOS 无终端窗口启动器（`LSUIElement` 后台应用；内部直接启动 `server.py`，输出写入 `~/Library/Logs/总控台/console.log`）
 
 ## 运行
@@ -52,7 +56,7 @@
     "portOwner": null, "portConflict": false, "portConflictApps": []
   }],
   "watchedKeywords": ["ffmpeg"],
-  "consolePort": 9600, "consolePid": 123, "consoleCwd": "/path/to/总控台",
+  "consolePort": 9600, "consolePid": 123, "consoleInstanceId": "opaque-per-server-instance", "consoleCwd": "/path/to/总控台",
   "version": "1.0.0", "schemaVersion": 1,
   "degraded": false, "degradedReasons": []
 }

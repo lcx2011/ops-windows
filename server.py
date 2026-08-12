@@ -125,6 +125,7 @@ LOG = logging.getLogger("console")
 LOG_LOCK = threading.RLock()
 MANUAL_STOP_LOCK = threading.RLock()
 MANUAL_STOP_TOKENS = set()
+DESKTOP_ACTION_HANDLER = None
 
 
 def classify_task_exit(code):
@@ -1308,7 +1309,7 @@ def build_apps(cfg, listeners, groups=None):
     return apps
 
 
-def build_state(cfg, console_port, config_health=None):
+def build_state(cfg, console_port, config_health=None, console_instance_id=None):
     degraded_reasons = []
     # 一次 pgid 快照供 build_services / build_apps 共享，避免每轮两次全量 ps。
     needs_groups = any(
@@ -1346,6 +1347,7 @@ def build_state(cfg, console_port, config_health=None):
         "watchedKeywords": cfg.get("watchedKeywords") or [],
         "consolePort": console_port,
         "consolePid": SELF_PID,
+        "consoleInstanceId": console_instance_id,
         "consoleCwd": BASE_DIR,
         "consoleDataDir": DATA_DIR,
         "consoleLogDir": LOGS_DIR,
@@ -1373,13 +1375,28 @@ def invalidate_state_cache():
         _state_cache["state"] = None
 
 
-def get_state_snapshot(cfg, console_port):
+def get_state_snapshot(cfg, console_port, console_instance_id=None):
     now = time.monotonic()
     with _state_cache_lock:
         cached = _state_cache["state"]
-        if cached is not None and now - _state_cache["mono"] < STATE_CACHE_TTL:
+        same_console = cached is not None
+        if console_instance_id is not None:
+            same_console = same_console and (
+                cached.get("consolePort") == console_port
+                and cached.get("consolePid") == SELF_PID
+                and cached.get("consoleInstanceId") == console_instance_id
+            )
+        if (same_console and now - _state_cache["mono"] < STATE_CACHE_TTL):
             return cached
-        state = build_state(cfg.snapshot(), console_port, cfg.health_info())
+        if console_instance_id is None:
+            # Keep the helper's historical three-argument call shape for
+            # embedders and tests that replace build_state with a stub.
+            state = build_state(cfg.snapshot(), console_port,
+                                cfg.health_info())
+        else:
+            state = build_state(
+                cfg.snapshot(), console_port, cfg.health_info(),
+                console_instance_id)
         _state_cache["mono"] = time.monotonic()
         _state_cache["state"] = state
         return state
@@ -2996,6 +3013,7 @@ class ConsoleServer(ThreadingHTTPServer):
         super().__init__(addr, handler_cls)
         self.cfg = cfg
         self.console_port = self.server_address[1]
+        self.console_instance_id = secrets.token_urlsafe(12)
         self.control_token = secrets.token_urlsafe(32)
         self._app_locks = {}
         self._app_locks_guard = threading.Lock()
@@ -3263,8 +3281,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(build_health(self.server.cfg))
                 return
             if path == "/api/state":
-                self.send_json(get_state_snapshot(self.server.cfg,
-                                                  self.server.console_port))
+                self.send_json(get_state_snapshot(
+                    self.server.cfg, self.server.console_port,
+                    getattr(self.server, "console_instance_id", None)))
                 return
             if path == "/api/console/log":
                 self.handle_console_log(parsed.query)
@@ -4199,6 +4218,14 @@ def launcher_main():
 
 def schedule_console_restart(server, preferred_port):
     """启动独立 helper，响应发出后关闭当前 HTTP 服务。"""
+    if request_desktop_action("restart", preferred_port):
+
+        def _shutdown_desktop():
+            time.sleep(0.25)
+            server.shutdown()
+
+        threading.Thread(target=_shutdown_desktop, daemon=True).start()
+        return SELF_PID
     creationflags = PLATFORM.process_creation_flags()
     helper = subprocess.Popen(
         [sys.executable, os.path.abspath(__file__), "--restart-helper",
@@ -4213,8 +4240,72 @@ def schedule_console_restart(server, preferred_port):
     return helper.pid
 
 
+def desktop_action_path():
+    """Return the private parent-control marker used by the Windows desktop host."""
+    if os.environ.get("CONSOLE_DESKTOP_BACKEND") != "1":
+        return None
+    raw = (os.environ.get("CONSOLE_DESKTOP_ACTION_FILE") or "").strip()
+    if not raw or not os.path.isabs(raw):
+        return None
+    return os.path.abspath(raw)
+
+
+def set_desktop_action_handler(handler):
+    """Register an in-process desktop host callback, if one owns this server."""
+    global DESKTOP_ACTION_HANDLER
+    DESKTOP_ACTION_HANDLER = handler
+
+
+def request_desktop_action(action, preferred_port=None):
+    """Dispatch a desktop action directly, with a file fallback for frozen hosts."""
+    handler = DESKTOP_ACTION_HANDLER
+    if handler is not None:
+        try:
+            handler(action, preferred_port)
+            return True
+        except Exception:
+            LOG.exception("桌面宿主动作回调失败")
+            return False
+    if desktop_action_path():
+        return write_desktop_action(action, preferred_port)
+    return False
+
+
+def write_desktop_action(action, preferred_port=None):
+    """Tell the desktop host why this backend is about to shut down."""
+    path = desktop_action_path()
+    if not path or action not in ("restart", "stop"):
+        return False
+    payload = {"action": action}
+    if preferred_port is not None:
+        payload["preferredPort"] = int(preferred_port)
+    directory = os.path.dirname(path) or "."
+    try:
+        _ensure_private_dir(directory)
+        fd, temp_path = tempfile.mkstemp(
+            prefix=".desktop-action-", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+        finally:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+        return True
+    except OSError:
+        LOG.exception("无法写入桌面宿主动作标记")
+        return False
+
+
 def schedule_console_stop(server):
     """响应发送完成后关闭 HTTP 服务，不结束启动台里的独立进程组。"""
+    request_desktop_action("stop")
+
     def _shutdown():
         time.sleep(0.25)
         server.shutdown()
@@ -4234,7 +4325,7 @@ def restart_helper(old_pid, preferred_port):
     return 0
 
 
-def _run_console(preferred_port=None, open_browser=True):
+def _run_console(preferred_port=None, open_browser=True, on_ready=None):
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -4261,6 +4352,11 @@ def _run_console(preferred_port=None, open_browser=True):
         sys.exit(1)
 
     print("总控台已启动: http://%s:%d/  (Ctrl+C 停止)" % (HOST, port), flush=True)
+    if on_ready:
+        try:
+            on_ready(server, port)
+        except Exception:
+            LOG.exception("总控台启动回调失败")
     if open_browser:
         open_browser_later(port)
     try:
@@ -4302,7 +4398,8 @@ def redirect_console_output():
             pass
 
 
-def main(preferred_port=None, open_browser=True, log_to_file=False):
+def main(preferred_port=None, open_browser=True, log_to_file=False,
+         on_ready=None):
     """Run exactly one console for this project/data directory."""
     migration = prepare_runtime_storage()
     if log_to_file:
@@ -4323,7 +4420,7 @@ def main(preferred_port=None, open_browser=True, log_to_file=False):
                 webbrowser.open("http://%s:%d/" % (HOST, min(ports)))
         return False
     try:
-        _run_console(preferred_port, open_browser)
+        _run_console(preferred_port, open_browser, on_ready)
         return True
     finally:
         release_instance_lock(instance_lock)

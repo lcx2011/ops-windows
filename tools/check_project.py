@@ -110,11 +110,16 @@ def check_required_files() -> str:
         ".github/PULL_REQUEST_TEMPLATE.md",
         "requirements-dev.txt",
         "requirements-windows.txt",
+        "requirements-desktop-windows.txt",
+        "requirements-build-windows.txt",
         "Makefile",
         "server.py",
         "platform_support.py",
+        "desktop_app.py",
         "start.command",
         "start-windows.cmd",
+        "start-desktop.cmd",
+        "build-desktop-windows.cmd",
         "tests/test_server.py",
         "docs/screenshots/ops-launchpad.jpg",
         "docs/screenshots/ops-services.jpg",
@@ -214,7 +219,8 @@ def check_version() -> str:
 
 
 def check_python_syntax() -> str:
-    paths = [ROOT / "server.py", ROOT / "platform_support.py"]
+    paths = [ROOT / "server.py", ROOT / "platform_support.py",
+             ROOT / "desktop_app.py"]
     paths.extend(sorted((ROOT / "tools").glob("*.py")))
     paths.extend(sorted((ROOT / "tests").glob("test_*.py")))
     for path in paths:
@@ -406,7 +412,21 @@ def check_shell_and_plist() -> str:
         require("goto run-with-py" in text and
                 "python server.py --launcher" in text,
                 "Windows 启动脚本没有 Python 回退启动路径")
-        return "1 个 Windows 启动脚本"
+        desktop_launcher = ROOT / "start-desktop.cmd"
+        require(desktop_launcher.is_file(), "缺少 Windows 桌面启动脚本")
+        desktop_text = desktop_launcher.read_text(encoding="utf-8")
+        require("desktop_app" in desktop_text,
+                "Windows 桌面启动脚本没有调用 desktop_app")
+        require("pythonw" in desktop_text or "pyw" in desktop_text,
+                "Windows 桌面启动脚本不能使用带控制台的 Python 入口")
+        require("cd /d \"%~dp0\"" in desktop_text,
+                "Windows 桌面启动脚本没有切换到项目目录")
+        build_launcher = ROOT / "build-desktop-windows.cmd"
+        require(build_launcher.is_file(), "缺少 Windows 桌面构建脚本")
+        build_text = build_launcher.read_text(encoding="utf-8")
+        require("PyInstaller" in build_text and "desktop-app.spec" in build_text,
+                "Windows 桌面构建脚本没有调用 PyInstaller spec")
+        return "3 个 Windows 启动/构建脚本"
     shell_files = (
         ROOT / "start.command",
         ROOT / "总控台.app" / "Contents" / "MacOS" / "launcher",
@@ -445,6 +465,28 @@ def check_windows_requirements() -> str:
     require(lines == ["psutil==7.0.0"],
             "Windows 运行依赖必须精确锁定 psutil==7.0.0")
     return "1 个锁定的 Windows 运行依赖"
+
+
+def check_desktop_requirements() -> str:
+    path = ROOT / "requirements-desktop-windows.txt"
+    lines = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    require(lines == ["pywebview==5.3.2"],
+            "桌面依赖必须精确锁定 pywebview==5.3.2")
+    require((ROOT / "desktop-app.spec").is_file(),
+            "缺少 PyInstaller 桌面打包配置")
+    build_path = ROOT / "requirements-build-windows.txt"
+    build_lines = [
+        line.strip()
+        for line in build_path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    require(build_lines == ["pyinstaller==6.21.0"],
+            "Windows 构建依赖必须精确锁定 pyinstaller==6.21.0")
+    return "1 个桌面运行依赖 + 1 个构建依赖 + PyInstaller 配置"
 
 
 def check_themes() -> str:
@@ -645,6 +687,7 @@ def main() -> int:
         ("启动脚本与 plist", check_shell_and_plist),
         ("开发依赖锁定", check_dev_requirements),
         ("Windows 运行依赖锁定", check_windows_requirements),
+        ("Windows 桌面依赖", check_desktop_requirements),
         ("素材来源台账", check_asset_provenance),
         ("主题注册表", check_themes),
         ("静态资源与模块", check_static_references),
