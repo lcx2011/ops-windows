@@ -11,10 +11,10 @@
 
 ## 开发环境
 
-- macOS 12 或更高版本；
-- Python 3.12；
+- macOS 12 或更高版本，或 Windows 10/11；
+- Python 3.9+（macOS `start.command`/`.app` 启动器当前要求 3.12+）；
 - Node.js，仅用于 JavaScript 语法检查；
-- 运行时无第三方 Python 依赖。
+- Windows 推荐安装 `requirements-windows.txt` 中锁定的 `psutil`；macOS 运行时无第三方 Python 依赖。
 
 只有重新生成纹理时才需要开发依赖：
 
@@ -24,9 +24,15 @@ source .venv/bin/activate
 python3 -m pip install -r requirements-dev.txt
 ```
 
+Windows PowerShell：
+
+```powershell
+py -3 -m pip install -r requirements-windows.txt
+```
+
 ## 修改原则
 
-- 后端保持 Python 标准库实现；前端保持原生 ES Modules、无 CDN、无构建。
+- 后端保持 Python 标准库实现；Windows 平台依赖仅用于增强监控，前端保持原生 ES Modules、无 CDN、无构建。
 - 不得削弱回环绑定、当前 UID、run token、进程组、Host/Origin 或控制令牌等安全校验。
 - 不得按端口直接结束未知进程。
 - 配置变更必须有明确 `schemaVersion`、幂等迁移和升级测试。

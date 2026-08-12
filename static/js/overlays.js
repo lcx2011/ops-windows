@@ -41,6 +41,13 @@ function shellQuotePath(path) {
   return "'" + String(path).replace(/'/g, "'\"'\"'") + "'";
 }
 function fallbackScriptCommand(path) {
+  if (/^[A-Za-z]:[\\/]/.test(String(path))) {
+    const escaped = '"' + String(path).replace(/"/g, '\\"') + '"';
+    const suffix = (String(path).match(/(\.[^./\\]+)$/) || [])[1]?.toLowerCase();
+    if (suffix === '.py') return 'python -- ' + escaped;
+    if (suffix === '.ps1') return 'powershell -NoProfile -ExecutionPolicy Bypass -File ' + escaped;
+    return escaped;
+  }
   const quoted = shellQuotePath(path);
   const suffix = (String(path).match(/(\.[^./]+)$/) || [])[1]?.toLowerCase();
   if (suffix === '.py') return 'python3 -- ' + quoted;
@@ -565,10 +572,11 @@ export function initAppModal({ onAddService, onAddTask }) {
       if (!r || r.canceled || !r.path) return;  // 取消或失败均静默
       const p = r.path;
       fCmd.value = r.command || fallbackScriptCommand(p);
-      const dir = p.slice(0, p.lastIndexOf('/'));
+      const separator = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+      const dir = separator >= 0 ? p.slice(0, separator) : '';
       if (dir && !fCwd.value.trim()) fCwd.value = dir;
       if (!fName.value.trim()) {
-        const base = p.split('/').pop().replace(/\.(command|sh|bash|zsh|py)$/i, '');
+        const base = p.split(/[\\/]/).pop().replace(/\.(command|sh|bash|zsh|py|ps1|cmd|bat)$/i, '');
         if (base) fName.value = base;
       }
       fCmd.classList.remove('invalid');
@@ -583,7 +591,7 @@ export function initAppModal({ onAddService, onAddTask }) {
     }
   });
 
-  /* 浏览工作目录（macOS 原生选择框） */
+  /* 浏览工作目录（平台原生选择框） */
   btnPickCwd.addEventListener('click', async () => {
     btnPickCwd.disabled = true;
     try {

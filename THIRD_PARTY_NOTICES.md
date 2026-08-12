@@ -4,6 +4,13 @@
 
 素材级来源、SHA-256、修改记录与发布状态见 `ASSET_PROVENANCE.md`。两份文件必须同步维护：本文件说明适用权利和上游声明，素材台账负责逐文件追溯与发布门禁。
 
+## psutil
+
+- 用途：Windows 运行时的进程、端口、工作目录和进程树监控增强。
+- 版本：`7.0.0`（见 `requirements-windows.txt`）。
+- 项目：<https://github.com/giampaolo/psutil>
+- 许可：BSD-3-Clause；依赖从 PyPI 安装，不在本项目中 vendored。
+
 ## Lucide Icons
 
 - 位置：`static/icons/*.svg` 与由它们生成的 `static/icons.js`

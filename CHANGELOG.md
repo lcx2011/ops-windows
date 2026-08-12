@@ -10,6 +10,7 @@
 
 ### Added
 
+- 增加 Windows 10/11 支持：使用 `start-windows.cmd` 启动，支持 Windows 进程/端口/cwd 监控、PowerShell 文件选择、Job Object 进程组、实例锁和 LocalAppData 数据目录；`psutil` 为推荐增强依赖。
 - 顶栏新增 GitHub 仓库图标按钮，点击在新标签页打开项目源码仓库。
 - 增加用户/开发文档、备份恢复和升级卸载指南。
 - 布局升级为指挥台结构：左侧图标导航轨、启动台与服务监控双视图 KPI 概览卡（含 CPU/内存火花线）、右侧实时动态/实时告警与端口/资源 TOP 5 信息栏、小贴士、页头快捷操作，以及服务/任务分区筛选芯片；服务表格增加 PID、状态列与 CPU 迷你负载条。结构样式集中于 `base.css`。
@@ -29,6 +30,7 @@
 
 ### Changed
 
+- 平台适配从 `server.py` 抽离到 `platform_support.py`；macOS 保持 `ps`/`lsof`/`fcntl` 路径，Windows 使用 `psutil`/PowerShell/CIM、Job Object、`taskkill` 和 `msvcrt`。
 - 默认将配置/图标移至 `~/Library/Application Support/总控台`，日志移至 `~/Library/Logs/总控台`。新目标不存在时仅首次复制旧 `data/`，不删除原文件。
 - `config.json.bak` 现保留修改前的上一份良好配置，而不是与主配置相同的副本。
 - 运行目录权限收紧为 `0700`，配置、图标和日志文件为 `0600`。

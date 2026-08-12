@@ -109,9 +109,12 @@ def check_required_files() -> str:
         ".github/ISSUE_TEMPLATE/feature_request.yml",
         ".github/PULL_REQUEST_TEMPLATE.md",
         "requirements-dev.txt",
+        "requirements-windows.txt",
         "Makefile",
         "server.py",
+        "platform_support.py",
         "start.command",
+        "start-windows.cmd",
         "tests/test_server.py",
         "docs/screenshots/ops-launchpad.jpg",
         "docs/screenshots/ops-services.jpg",
@@ -211,7 +214,7 @@ def check_version() -> str:
 
 
 def check_python_syntax() -> str:
-    paths = [ROOT / "server.py"]
+    paths = [ROOT / "server.py", ROOT / "platform_support.py"]
     paths.extend(sorted((ROOT / "tools").glob("*.py")))
     paths.extend(sorted((ROOT / "tests").glob("test_*.py")))
     for path in paths:
@@ -392,6 +395,18 @@ def check_javascript_bindings() -> str:
 
 
 def check_shell_and_plist() -> str:
+    if os.name == "nt":
+        launcher = ROOT / "start-windows.cmd"
+        require(launcher.is_file(), "缺少 Windows 启动脚本")
+        text = launcher.read_text(encoding="utf-8")
+        require("server.py --launcher" in text,
+                "Windows 启动脚本没有调用 server.py --launcher")
+        require("cd /d \"%~dp0\"" in text,
+                "Windows 启动脚本没有切换到项目目录")
+        require("goto run-with-py" in text and
+                "python server.py --launcher" in text,
+                "Windows 启动脚本没有 Python 回退启动路径")
+        return "1 个 Windows 启动脚本"
     shell_files = (
         ROOT / "start.command",
         ROOT / "总控台.app" / "Contents" / "MacOS" / "launcher",
@@ -418,6 +433,18 @@ def check_dev_requirements() -> str:
     ]
     require(not unpinned, "开发依赖必须精确锁定: " + ", ".join(unpinned))
     return f"{len(lines)} 个锁定依赖"
+
+
+def check_windows_requirements() -> str:
+    path = ROOT / "requirements-windows.txt"
+    lines = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    require(lines == ["psutil==7.0.0"],
+            "Windows 运行依赖必须精确锁定 psutil==7.0.0")
+    return "1 个锁定的 Windows 运行依赖"
 
 
 def check_themes() -> str:
@@ -554,10 +581,14 @@ def check_javascript_tests() -> str:
     files = sorted(str(path) for path in (ROOT / "tests" / "js").glob("*.test.mjs"))
     require(bool(files), "tests/js/ 下没有 .test.mjs 测试文件")
     output = command_output([node, "--test", *files])
-    match = re.search(r"# (pass)\s+(\d+)", output)
+    # Node 20/22 print TAP counters with ``#`` while newer Node releases use
+    # an informational prefix.  Windows may decode that UTF-8 prefix through
+    # the active console code page, so match the stable counter label only.
+    match = re.search(r"(?m)^[^\r\n]*\bpass\s+(\d+)\s*$", output)
     require(match is not None, "无法确认 node --test 结果")
-    passed = int(match.group(2))
-    require("# fail" not in output or re.search(r"# fail\s+0$", output, re.M),
+    passed = int(match.group(1))
+    fail_match = re.search(r"(?m)^[^\r\n]*\bfail\s+(\d+)\s*$", output)
+    require(not fail_match or int(fail_match.group(1)) == 0,
             "JavaScript 测试存在失败项")
     return f"{passed} 个测试"
 
@@ -613,6 +644,7 @@ def main() -> int:
         ("JavaScript 模块绑定", check_javascript_bindings),
         ("启动脚本与 plist", check_shell_and_plist),
         ("开发依赖锁定", check_dev_requirements),
+        ("Windows 运行依赖锁定", check_windows_requirements),
         ("素材来源台账", check_asset_provenance),
         ("主题注册表", check_themes),
         ("静态资源与模块", check_static_references),

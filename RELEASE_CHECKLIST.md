@@ -20,7 +20,7 @@
 - [ ] Git 工作区干净，没有未审查的改动。
 - [ ] `make release-check` 通过，完整输出已归档。
 - [ ] 测试数量大于 0，失败与错误均为 0。
-- [ ] Python、JavaScript、Bash、plist 和主题 JSON 语法检查通过。
+- [ ] Python、JavaScript、Bash/plist（macOS）或 Windows 启动脚本和主题 JSON 语法检查通过。
 - [ ] `static/icons.js` 与 `static/icons/*.svg` 同步。
 - [ ] 所有引用的静态字体、图像、主题和模块都存在。
 - [ ] `SECURITY.md`、`CONTRIBUTING.md`、`CODE_OF_CONDUCT.md` 和 `ASSET_PROVENANCE.md` 已通过复核并进入发行范围。
@@ -68,7 +68,7 @@
 - [ ] 用户向上滚动阅读日志时，自动刷新不会强制拉回底部。
 - [ ] `prefers-reduced-motion` 与高对比度/键盘焦点验收通过。
 
-## 6. macOS 安装包
+## 6. macOS 安装包与 Windows 目录交付
 
 - [ ] 在未安装开发工具、不存在旧 `data/` 的目标 macOS 版本上完成全新安装。
 - [ ] 如果交付声称“独立 App”，发行包已捆绑 Python 和所有必要文件，单独复制 `.app` 也能运行。
@@ -76,6 +76,9 @@
 - [ ] 缺少或版本不符的 Python 会显示可理解、可操作的错误，不会静默退出。
 - [ ] App 具有正确的 bundle id、版本、build 号、最低系统版本和图标。
 - [ ] 对外分发包已使用 Developer ID 签名、提交公证并完成 Gatekeeper 验证。
+- [ ] Windows 10/11 使用完整项目目录解压运行，`start-windows.cmd` 能启动并复用本地浏览器。
+- [ ] Windows 已验证 Python 3.9+、`requirements-windows.txt` 安装、LocalAppData 数据目录 ACL，以及服务/任务的启动、停止、重启和日志。
+- [ ] Windows 进程树停止不会误杀其他用户或其他卡片的进程；缺失 `psutil` 时降级提示可理解。
 
 ## 7. 许可、隐私与发行包内容
 

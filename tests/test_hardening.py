@@ -3,6 +3,7 @@ import http.client
 import json
 import os
 import signal
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,21 @@ import unittest
 from unittest import mock
 
 import server
+
+
+def long_running_command(seconds=20):
+    if server.PLATFORM.IS_WINDOWS:
+        executable = subprocess.list2cmdline([sys.executable])
+        return '%s -c "import time; time.sleep(%d)"' % (executable, seconds)
+    return "%s -c 'import time; time.sleep(%d)'" % (
+        shlex.quote(sys.executable), seconds)
+
+
+def force_stop_group(group_id):
+    if server.PLATFORM.IS_WINDOWS:
+        server.PLATFORM.terminate_process_group(group_id, force=True)
+        return
+    os.killpg(group_id, signal.SIGKILL)
 
 
 class HttpHarness:
@@ -295,7 +311,8 @@ class OperationLockTests(unittest.TestCase):
     def setUp(self):
         self.h = HttpHarness()
         app = {**server.Config.APP_DEFAULT,
-               "id": "deadbeef", "name": "Service", "command": "sleep 10",
+               "id": "deadbeef", "name": "Service",
+               "command": long_running_command(10),
                "kind": "service", "cwd": self.h.tmp.name}
         self.h.cfg.update(lambda data: data["apps"].append(app))
 
@@ -397,7 +414,8 @@ class ProcessLifecycleHardeningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td, \
                 mock.patch.object(server, "LOGS_DIR", td):
             base = {**server.Config.APP_DEFAULT, "id": "deadbeef",
-                    "name": "Service", "command": "sleep 20", "cwd": td}
+                    "name": "Service", "command": long_running_command(),
+                    "cwd": td}
             cfg = self._config_with_app(td, base)
             ok, error, proc, pgid, token = server.start_app(base)
             self.assertTrue(ok, error)
@@ -416,7 +434,7 @@ class ProcessLifecycleHardeningTests(unittest.TestCase):
                 if server.stop_target_alive(
                         {"kind": "group", "id": pgid, "members": [proc.pid]}):
                     try:
-                        os.killpg(pgid, signal.SIGKILL)
+                        force_stop_group(pgid)
                     except OSError:
                         pass
 
@@ -425,7 +443,8 @@ class ProcessLifecycleHardeningTests(unittest.TestCase):
                 mock.patch.object(server, "LOGS_DIR", td):
             previous = {"code": 0, "at": 123, "durationSec": 0.1}
             base = {**server.Config.APP_DEFAULT, "id": "deadbeef",
-                    "name": "Task", "kind": "task", "command": "sleep 20",
+                    "name": "Task", "kind": "task",
+                    "command": long_running_command(),
                     "cwd": td, "lastExit": previous}
             cfg = self._config_with_app(td, base)
             ok, error, proc, pgid, token = server.start_app(base)
@@ -449,11 +468,13 @@ class ProcessLifecycleHardeningTests(unittest.TestCase):
                 if server.stop_target_alive(
                         {"kind": "group", "id": pgid, "members": [proc.pid]}):
                     try:
-                        os.killpg(pgid, signal.SIGKILL)
+                        force_stop_group(pgid)
                     except OSError:
                         pass
 
     def test_sigterm_timeout_retains_runtime_identity_for_retry(self):
+        if server.PLATFORM.IS_WINDOWS:
+            self.skipTest("Windows escalates verified trees after taskkill timeout")
         command = (
             "python3 -c 'import signal,time; "
             "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(20)'")
@@ -481,7 +502,7 @@ class ProcessLifecycleHardeningTests(unittest.TestCase):
                     {"kind": "group", "id": pgid, "members": [proc.pid]}))
             finally:
                 try:
-                    os.killpg(pgid, signal.SIGKILL)
+                    force_stop_group(pgid)
                 except OSError:
                     pass
 

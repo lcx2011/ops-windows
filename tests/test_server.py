@@ -13,6 +13,27 @@ from unittest import mock
 import server
 
 
+def foreign_uid():
+    if isinstance(server.SELF_UID, int):
+        return server.SELF_UID + 1
+    return server.SELF_UID + "#foreign"
+
+
+def long_running_command(seconds=20):
+    if server.PLATFORM.IS_WINDOWS:
+        executable = subprocess.list2cmdline([sys.executable])
+        return '%s -c "import time; time.sleep(%d)"' % (executable, seconds)
+    return "%s -c 'import time; time.sleep(%d)'" % (
+        shlex.quote(sys.executable), seconds)
+
+
+def force_stop_group(group_id):
+    if server.PLATFORM.IS_WINDOWS:
+        server.PLATFORM.terminate_process_group(group_id, force=True)
+        return
+    os.killpg(group_id, signal.SIGKILL)
+
+
 class ParsingTests(unittest.TestCase):
     def test_parse_etime(self):
         self.assertEqual(server.parse_etime("02:03"), 123)
@@ -32,7 +53,8 @@ node 101 user 1u IPv6 0x0 0t0 TCP [::1]:5173 (LISTEN)
 node 202 user 2u IPv4 0x0 0t0 TCP 127.0.0.1:8000 (LISTEN)
 node 303 user 3u IPv6 0x0 0t0 TCP *:3000 (LISTEN)
 """
-        with mock.patch.object(server, "run_cmd", return_value=output):
+        with mock.patch.object(server.PLATFORM, "IS_WINDOWS", False), \
+                mock.patch.object(server, "run_cmd", return_value=output):
             listeners = server.scan_listeners()
 
         self.assertEqual(listeners[(101, 5173)], {"::1"})
@@ -129,20 +151,34 @@ class OriginAttributionTests(unittest.TestCase):
 
 class ScriptCommandTests(unittest.TestCase):
     def test_script_extensions_choose_the_expected_runtime_and_quote_paths(self):
-        cases = {
-            ".py": "python3",
-            ".zsh": "/bin/zsh",
-            ".sh": "/bin/bash",
-            ".bash": "/bin/bash",
-        }
+        if server.PLATFORM.IS_WINDOWS:
+            cases = {
+                ".py": (sys.executable, "--"),
+                ".ps1": ("powershell", "-NoProfile",
+                         "-ExecutionPolicy", "Bypass", "-File"),
+                ".cmd": (),
+            }
+        else:
+            cases = {
+                ".py": ("python3", "--"),
+                ".zsh": ("/bin/zsh", "--"),
+                ".sh": ("/bin/bash", "--"),
+                ".bash": ("/bin/bash", "--"),
+            }
         with tempfile.TemporaryDirectory() as td:
             for suffix, runner in cases.items():
                 with self.subTest(suffix=suffix):
                     path = os.path.join(td, "job's file" + suffix)
                     with open(path, "w", encoding="utf-8") as handle:
                         handle.write("echo ok\n")
-                    parts = shlex.split(server.command_for_script(path))
-                    self.assertEqual(parts, [runner, "--", path])
+                    parts = server._simple_command_tokens(
+                        server.command_for_script(path))
+                    if server.PLATFORM.IS_WINDOWS and suffix == ".cmd":
+                        self.assertEqual(parts, [path])
+                    elif server.PLATFORM.IS_WINDOWS and suffix == ".ps1":
+                        self.assertEqual(parts, [*runner, path])
+                    else:
+                        self.assertEqual(parts, [*runner, path])
 
     def test_executable_command_is_invoked_directly(self):
         with tempfile.TemporaryDirectory() as td:
@@ -159,9 +195,10 @@ class ScriptCommandTests(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write("echo ok\n")
             os.chmod(path, 0o600)
-            self.assertEqual(
-                shlex.split(server.command_for_script(path)),
-                ["/bin/bash", "--", path])
+            expected = ([path] if server.PLATFORM.IS_WINDOWS else
+                        ["/bin/bash", "--", path])
+            self.assertEqual(server._simple_command_tokens(
+                server.command_for_script(path)), expected)
 
 
 class AppHealthTests(unittest.TestCase):
@@ -185,14 +222,17 @@ class AppHealthTests(unittest.TestCase):
             path = os.path.join(td, "job.sh")
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write("echo ok\n")
-            app = {"command": "/bin/bash -- job.sh", "cwd": td}
+            command = ("bash " + subprocess.list2cmdline(["job.sh"])
+                       if server.PLATFORM.IS_WINDOWS else "/bin/bash -- job.sh")
+            app = {"command": command, "cwd": td}
             self.assertFalse(server.inspect_app_health(app)["blocking"])
 
     def test_missing_cwd_does_not_cascade_for_relative_script(self):
         with tempfile.TemporaryDirectory() as td:
             missing = os.path.join(td, "gone")
-            health = server.inspect_app_health({
-                "command": "/bin/bash -- job.sh", "cwd": missing})
+            command = ("bash job.sh" if server.PLATFORM.IS_WINDOWS
+                       else "/bin/bash -- job.sh")
+            health = server.inspect_app_health({"command": command, "cwd": missing})
         self.assertEqual([item["kind"] for item in health["issues"]],
                          ["cwd-missing"])
 
@@ -226,17 +266,25 @@ class AppHealthTests(unittest.TestCase):
             os.chmod(path, 0o600)
             direct = server.inspect_app_health(
                 {"command": shlex.quote(path), "cwd": td})
+            wrapped_command = ("bash " + subprocess.list2cmdline([path])
+                               if server.PLATFORM.IS_WINDOWS else
+                               "/bin/bash -- " + shlex.quote(path))
             wrapped = server.inspect_app_health(
-                {"command": "/bin/bash -- " + shlex.quote(path), "cwd": td})
-        self.assertEqual(direct["issues"][0]["kind"], "script-not-executable")
-        self.assertFalse(wrapped["blocking"])
+                {"command": wrapped_command, "cwd": td})
+        if server.PLATFORM.IS_WINDOWS:
+            self.assertFalse(direct["blocking"])
+        else:
+            self.assertEqual(direct["issues"][0]["kind"], "script-not-executable")
+        self.assertFalse(wrapped["blocking"], wrapped)
 
     def test_broken_script_symlink_is_unavailable(self):
         with tempfile.TemporaryDirectory() as td:
             link = os.path.join(td, "job.py")
             os.symlink(os.path.join(td, "missing.py"), link)
-            health = server.inspect_app_health(
-                {"command": server.command_for_script(link), "cwd": td})
+            command = (subprocess.list2cmdline([link])
+                       if server.PLATFORM.IS_WINDOWS else
+                       server.command_for_script(link))
+            health = server.inspect_app_health({"command": command, "cwd": td})
         self.assertEqual(health["issues"][0]["kind"], "script-missing")
 
     def test_task_cancel_exit_code_survives_shell_wrapper(self):
@@ -300,11 +348,14 @@ class ProjectDetectionTests(unittest.TestCase):
             static, static_error = server.detect_project(static_dir)
 
         self.assertIsNone(django_error)
-        self.assertEqual(django["candidates"][0]["command"], "python3 manage.py runserver")
+        expected_python = "python manage.py" if server.PLATFORM.IS_WINDOWS else "python3 manage.py"
+        self.assertEqual(django["candidates"][0]["command"],
+                         expected_python + " runserver")
         self.assertEqual(django["candidates"][0]["port"], 8000)
         self.assertIsNone(static_error)
         self.assertEqual(static["candidates"][0]["command"],
-                         "python3 -m http.server 8000")
+                         ("python -m http.server 8000" if server.PLATFORM.IS_WINDOWS
+                          else "python3 -m http.server 8000"))
 
     def test_invalid_folder_returns_a_clear_error(self):
         result, error = server.detect_project("/path/that/does/not/exist")
@@ -374,9 +425,10 @@ class ConfigTests(unittest.TestCase):
                 backup = json.load(f)
             self.assertEqual(current["watchedKeywords"], ["node", "ffmpeg"])
             self.assertEqual(backup["watchedKeywords"], ["node"])
-            self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
-            self.assertEqual(oct(os.stat(path + ".bak").st_mode & 0o777),
-                             "0o600")
+            if not server.PLATFORM.IS_WINDOWS:
+                self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
+                self.assertEqual(oct(os.stat(path + ".bak").st_mode & 0o777),
+                                 "0o600")
 
     def test_load_falls_back_to_backup(self):
         with tempfile.TemporaryDirectory() as td:
@@ -483,10 +535,11 @@ class RuntimeStorageTests(unittest.TestCase):
             with open(os.path.join(logs, "deadbeef.log"), "rb") as f:
                 self.assertEqual(f.read(), b"log")
             self.assertTrue(os.path.isfile(os.path.join(legacy, "config.json")))
-            self.assertEqual(oct(os.stat(target).st_mode & 0o777), "0o700")
-            self.assertEqual(
-                oct(os.stat(os.path.join(target, "config.json")).st_mode & 0o777),
-                "0o600")
+            if not server.PLATFORM.IS_WINDOWS:
+                self.assertEqual(oct(os.stat(target).st_mode & 0o777), "0o700")
+                self.assertEqual(
+                    oct(os.stat(os.path.join(target, "config.json")).st_mode & 0o777),
+                    "0o600")
 
             # 已存在的目标绝不被旧项目目录二次覆盖。
             with open(os.path.join(legacy, "config.json"), "w",
@@ -573,7 +626,8 @@ class RuntimeStorageTests(unittest.TestCase):
             log_path = os.path.join(logs, "console.log")
             with open(log_path, encoding="utf-8") as f:
                 self.assertEqual(f.read(), "launcher-log-ready\n")
-            self.assertEqual(os.stat(log_path).st_mode & 0o777, 0o600)
+            if not server.PLATFORM.IS_WINDOWS:
+                self.assertEqual(os.stat(log_path).st_mode & 0o777, 0o600)
 
 
 class ProcessIdentityTests(unittest.TestCase):
@@ -594,7 +648,7 @@ class ProcessIdentityTests(unittest.TestCase):
     def test_real_started_process_is_identified_and_stoppable(self):
         with tempfile.TemporaryDirectory() as td, \
                 mock.patch.object(server, "LOGS_DIR", td):
-            app = {"id": "deadbeef", "command": "sleep 20", "cwd": td}
+            app = {"id": "deadbeef", "command": long_running_command(), "cwd": td}
             ok, error, proc, pgid, token = server.start_app(app)
             self.assertTrue(ok, error)
             tracked = dict(app, lastPid=proc.pid, lastPgid=pgid, runToken=token)
@@ -610,10 +664,7 @@ class ProcessIdentityTests(unittest.TestCase):
                 proc.wait(timeout=3)
             finally:
                 if proc.poll() is None:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except OSError:
-                        pass
+                    force_stop_group(proc.pid)
                     proc.wait(timeout=3)
 
     def test_verified_legacy_process_can_be_stopped_without_port_kill(self):
@@ -621,13 +672,19 @@ class ProcessIdentityTests(unittest.TestCase):
                "runToken": None, "port": 8080, "cwd": "/tmp/project"}
         with mock.patch.object(server, "managed_pids", return_value=[]), \
                 mock.patch.object(server, "legacy_managed_pid", return_value=999), \
-                mock.patch.object(server.os, "kill") as stop:
+                mock.patch.object(server.os, "kill") as stop, \
+                mock.patch.object(server.PLATFORM, "terminate_pid",
+                                  return_value=(True, None)) as terminate:
             target, error = server.resolve_app_stop_target(
                 app, {(999, 8080)})
             self.assertIsNone(error)
             stopped, error = server.signal_app_stop(target)
             self.assertTrue(stopped, error)
-        stop.assert_called_once_with(999, signal.SIGTERM)
+        if server.PLATFORM.IS_WINDOWS:
+            terminate.assert_called_once_with(999, force=False)
+            stop.assert_not_called()
+        else:
+            stop.assert_called_once_with(999, signal.SIGTERM)
 
     def test_running_app_can_be_stopped_in_place_before_update(self):
         cfg = mock.Mock()
@@ -722,7 +779,7 @@ class ProcessIdentityTests(unittest.TestCase):
                 mock.patch.object(server, "scan_listeners",
                                   return_value={(4242, 8080)}), \
                 mock.patch.object(server, "ps_snapshot",
-                                  return_value={4242: {"uid": server.SELF_UID + 1}}):
+                                  return_value={4242: {"uid": foreign_uid()}}):
             ok, error, _ = server.attach_app_process(cfg, "a", app, 4242)
         self.assertFalse(ok)
         self.assertIn("不属于当前用户", error)
@@ -806,6 +863,14 @@ class ProcessIdentityTests(unittest.TestCase):
 
 class LaunchEnvironmentTests(unittest.TestCase):
     def test_headless_launch_path_includes_common_user_node_locations(self):
+        if server.PLATFORM.IS_WINDOWS:
+            env = server.build_launch_env("secret", {"PATH": r"C:\Windows\System32"})
+            paths = env["PATH"].split(os.pathsep)
+            self.assertIn(os.path.dirname(os.path.abspath(sys.executable)), paths)
+            self.assertIn(os.path.join(os.path.expanduser("~"),
+                                       "AppData", "Roaming", "npm"), paths)
+            self.assertEqual(env[server.RUN_TOKEN_ENV], "secret")
+            return
         with mock.patch.object(server.os.path, "expanduser", return_value="/Users/example"), \
                 mock.patch.object(server.glob, "glob", side_effect=[
                     ["/Users/example/.nvm/versions/node/v22/bin"],
@@ -970,7 +1035,7 @@ class StateTests(unittest.TestCase):
             10: {"uid": server.SELF_UID, "comm": "ffmpeg",
                  "args": "ffmpeg -i render-worker.mov",
                  "cpu": 1.0, "mem": 2.0, "etime": 3},
-            11: {"uid": server.SELF_UID + 1, "comm": "ffmpeg", "args": "ffmpeg -i b",
+            11: {"uid": foreign_uid(), "comm": "ffmpeg", "args": "ffmpeg -i b",
                  "cpu": 1.0, "mem": 2.0, "etime": 3},
         }
         with mock.patch.object(server, "ps_snapshot", return_value=snap):
@@ -1044,7 +1109,7 @@ class ConsoleRestartTests(unittest.TestCase):
                     "etime": 10},
             71002: {"uid": server.SELF_UID, "args": "python3 server.py",
                     "etime": 20},
-            71003: {"uid": server.SELF_UID + 1, "args": "python3 server.py",
+            71003: {"uid": foreign_uid(), "args": "python3 server.py",
                     "etime": 30},
             71004: {"uid": server.SELF_UID, "args": "python3 server.py --launcher",
                     "etime": 40},

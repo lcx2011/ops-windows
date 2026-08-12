@@ -8,7 +8,6 @@ API 契约与实现要点见 AGENTS.md。
 """
 
 import glob
-import fcntl
 import functools
 import errno
 import json
@@ -31,12 +30,26 @@ import webbrowser
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+
+import platform_support as PLATFORM
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 VERSION_PATH = os.path.join(BASE_DIR, "VERSION")
 LEGACY_DATA_DIR = os.path.join(BASE_DIR, "data")
-DEFAULT_DATA_DIR = os.path.expanduser(
-    "~/Library/Application Support/总控台")
-DEFAULT_LOGS_DIR = os.path.expanduser("~/Library/Logs/总控台")
+if PLATFORM.IS_WINDOWS:
+    _WINDOWS_LOCAL_APPDATA = (
+        os.environ.get("LOCALAPPDATA") or
+        os.path.join(os.path.expanduser("~"), "AppData", "Local"))
+    DEFAULT_DATA_DIR = os.path.join(_WINDOWS_LOCAL_APPDATA, "总控台")
+    DEFAULT_LOGS_DIR = os.path.join(DEFAULT_DATA_DIR, "logs")
+else:
+    DEFAULT_DATA_DIR = os.path.expanduser(
+        "~/Library/Application Support/总控台")
+    DEFAULT_LOGS_DIR = os.path.expanduser("~/Library/Logs/总控台")
 
 
 def resolve_runtime_dir(name, default):
@@ -106,7 +119,7 @@ RUN_TOKEN_ARG_PREFIX = "console-run:"
 TASK_CANCELED_EXIT_CODE = 130
 
 SELF_PID = os.getpid()
-SELF_UID = os.getuid()
+SELF_UID = PLATFORM.current_user_id()
 ICON_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".ico")
 LOG = logging.getLogger("console")
 LOG_LOCK = threading.RLock()
@@ -182,10 +195,11 @@ def _ensure_private_dir(path):
     os.makedirs(path, mode=0o700, exist_ok=True)
     if os.path.islink(path) or not os.path.isdir(path):
         raise OSError("私有运行路径不是安全目录: %s" % path)
-    try:
-        os.chmod(path, 0o700)
-    except OSError:
-        LOG.warning("无法收紧目录权限: %s", path)
+    if not PLATFORM.IS_WINDOWS:
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            LOG.warning("无法收紧目录权限: %s", path)
 
 
 def _copy_private_regular_file(source, target):
@@ -213,7 +227,8 @@ def _copy_private_regular_file(source, target):
                 os.close(target_fd)
     finally:
         os.close(source_fd)
-    os.chmod(target, 0o600)
+    if not PLATFORM.IS_WINDOWS:
+        os.chmod(target, 0o600)
     return True
 
 
@@ -228,7 +243,8 @@ def _install_migrated_directory(target, populate):
     staging = tempfile.mkdtemp(prefix=".console-migration-", dir=parent)
     installed = False
     try:
-        os.chmod(staging, 0o700)
+        if not PLATFORM.IS_WINDOWS:
+            os.chmod(staging, 0o700)
         populate(staging)
         try:
             os.rename(staging, target)
@@ -305,7 +321,8 @@ def prepare_runtime_storage():
     for path in (CONFIG_PATH, CONFIG_PATH + ".bak", INSTANCE_LOCK_PATH):
         try:
             if stat.S_ISREG(os.lstat(path).st_mode):
-                os.chmod(path, 0o600)
+                if not PLATFORM.IS_WINDOWS:
+                    os.chmod(path, 0o600)
         except OSError:
             pass
     for directory in (ICONS_DIR, LOGS_DIR):
@@ -317,7 +334,8 @@ def prepare_runtime_storage():
             for entry in entries:
                 try:
                     if entry.is_file(follow_symlinks=False):
-                        os.chmod(entry.path, 0o600)
+                        if not PLATFORM.IS_WINDOWS:
+                            os.chmod(entry.path, 0o600)
                 except OSError:
                     LOG.warning("无法收紧文件权限: %s", entry.path)
     return migration
@@ -330,7 +348,8 @@ def write_private_bytes(path, payload):
         f.write(payload)
         f.flush()
         os.fsync(f.fileno())
-    os.chmod(path, 0o600)
+    if not PLATFORM.IS_WINDOWS:
+        os.chmod(path, 0o600)
 
 
 # ---------------------------------------------------------------- 配置
@@ -532,7 +551,8 @@ class Config:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
-        os.chmod(path, 0o600)
+        if not PLATFORM.IS_WINDOWS:
+            os.chmod(path, 0o600)
 
 
 def acquire_instance_lock(path=INSTANCE_LOCK_PATH):
@@ -542,6 +562,8 @@ def acquire_instance_lock(path=INSTANCE_LOCK_PATH):
     :9600/:9601 would still update the same config.  flock ties exclusivity to
     this data directory and is released automatically if the process crashes.
     """
+    if PLATFORM.IS_WINDOWS:
+        return PLATFORM.acquire_instance_lock(path, SELF_PID)
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, mode=0o700, exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
@@ -569,6 +591,9 @@ def acquire_instance_lock(path=INSTANCE_LOCK_PATH):
 
 def release_instance_lock(lock_file):
     if lock_file is None:
+        return
+    if PLATFORM.IS_WINDOWS:
+        PLATFORM.release_instance_lock(lock_file)
         return
     try:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -622,6 +647,8 @@ def scan_listeners():
     字典仍可像旧集合一样迭代/判断 ``(pid, port)``，同时保留监听地址，
     供前端区分仅监听 ``::1`` 的服务（需通过 localhost 打开）。
     """
+    if PLATFORM.IS_WINDOWS:
+        return PLATFORM.listener_snapshot()
     out = run_cmd(["lsof", "-iTCP", "-sTCP:LISTEN", "-P", "-n"])
     found = {}
     for line in out.splitlines():
@@ -687,6 +714,8 @@ def ps_snapshot(pids=None, with_uid=True):
     注意：不能用 `comm=` 抑制表头——macOS ps 会把空表头列压到 16 字节截断
     内容；保留表头后解析时跳过表头行即可（首列非数字的行）。
     """
+    if PLATFORM.IS_WINDOWS:
+        return PLATFORM.process_snapshot(pids, with_uid)
     base = ["ps"]
     if pids is None:
         base.append("-ax")
@@ -743,6 +772,8 @@ def lsof_cwds(pids):
     pids = [int(p) for p in pids]
     if not pids:
         return {}
+    if PLATFORM.IS_WINDOWS:
+        return PLATFORM.process_cwds(pids)
     out = run_cmd(["lsof", "-a", "-p", ",".join(str(p) for p in pids),
                    "-d", "cwd", "-Fn"])
     result = {}
@@ -759,6 +790,8 @@ def lsof_cwds(pids):
 
 
 def pid_alive(pid):
+    if PLATFORM.IS_WINDOWS:
+        return PLATFORM.pid_alive(pid)
     try:
         os.kill(int(pid), 0)
         return True
@@ -804,8 +837,8 @@ def project_name(cwd):
     """从工作目录推断项目名（最后一段目录名），无有效 cwd 时返回 None。"""
     if not cwd:
         return None
-    cwd = cwd.rstrip("/")
-    if not cwd or cwd == "/" or cwd == HOME_DIR:
+    cwd = cwd.rstrip("/\\")
+    if not cwd or cwd in ("/", "\\") or cwd == HOME_DIR:
         return None
     return os.path.basename(cwd) or None
 
@@ -876,6 +909,8 @@ _ORIGIN_MULTIPLEXERS = {"tmux": "tmux", "screen": "screen"}
 
 def origin_snapshot():
     """ps -axo pid=,ppid=,args → {pid: (ppid, args)}，供来源溯源。"""
+    if PLATFORM.IS_WINDOWS:
+        return PLATFORM.origin_snapshot()
     table = {}
     for line in run_cmd(["ps", "-axo", "pid=,ppid=,args"]).splitlines():
         toks = line.split(None, 2)
@@ -924,6 +959,8 @@ def attribute_origin(pid, table):
             return {"label": label, "icon": icon}
         base = os.path.basename(
             parent_args.split()[0]).lstrip("-") if parent_args.split() else ""
+        if PLATFORM.IS_WINDOWS:
+            base = os.path.splitext(base)[0]
         if base in _ORIGIN_MULTIPLEXERS:
             return {"label": _ORIGIN_MULTIPLEXERS[base], "icon": "terminal"}
         if base and base not in _ORIGIN_SKIP_NAMES and candidate is None:
@@ -1024,6 +1061,8 @@ def pgid_members_map():
     """ps -axo pid=,pgid= → {pgid: [pid, ...]}。
     进程退出后其子孙仍保留原 pgid（被 launchd 收养也不变），
     因此按 pgid 能找到「脚本把服务放后台后自己退出」的存活成员。"""
+    if PLATFORM.IS_WINDOWS:
+        return PLATFORM.process_groups()
     groups = {}
     for line in run_cmd(["ps", "-axo", "pid=,pgid="]).splitlines():
         parts = line.split()
@@ -1051,7 +1090,21 @@ def managed_process_index(apps, groups=None):
     必须同时满足：属于记录的进程组、属于当前用户、argv 中带本次启动的
     随机 token。即使 PID/PGID 被系统复用，也不会把无关进程当成应用或停止它。
     """
-    if groups is None:
+    if PLATFORM.IS_WINDOWS:
+        # Rehydrate each recorded root directly.  A fresh psutil snapshot can
+        # briefly miss a just-created child, while the Job Object already
+        # knows the exact membership.
+        groups = dict(groups or {})
+        for app in apps:
+            if not app.get("runToken"):
+                continue
+            pgid = app.get("lastPgid") or app.get("lastPid")
+            if not isinstance(pgid, int) or pgid <= 0:
+                continue
+            members = PLATFORM.process_group_members(pgid)
+            if members:
+                groups[pgid] = members
+    elif groups is None:
         needs_groups = any(
             app.get("runToken")
             and isinstance(app.get("lastPgid") or app.get("lastPid"), int)
@@ -1294,6 +1347,8 @@ def build_state(cfg, console_port, config_health=None):
         "consolePort": console_port,
         "consolePid": SELF_PID,
         "consoleCwd": BASE_DIR,
+        "consoleDataDir": DATA_DIR,
+        "consoleLogDir": LOGS_DIR,
         "version": APP_VERSION,
         "schemaVersion": cfg.get("schemaVersion", CURRENT_SCHEMA_VERSION),
         "degraded": bool(degraded_reasons),
@@ -1345,7 +1400,8 @@ def build_health(cfg):
         else:
             try:
                 mode = os.lstat(path).st_mode
-                if stat.S_ISLNK(mode) or mode & 0o077:
+                if (stat.S_ISLNK(mode) or
+                        (not PLATFORM.IS_WINDOWS and mode & 0o077)):
                     issues.append("%s 目录权限不是 0700" % label)
             except OSError as e:
                 issues.append("无法检查 %s 目录: %s" % (label, e))
@@ -1360,7 +1416,8 @@ def build_health(cfg):
         except OSError as e:
             issues.append("无法检查 %s: %s" % (label, e))
             continue
-        if not stat.S_ISREG(mode) or mode & 0o077:
+        if (not stat.S_ISREG(mode) or
+                (not PLATFORM.IS_WINDOWS and mode & 0o077)):
             issues.append("%s 文件权限不是 0600" % label)
     degraded = bool(issues)
     snapshot = cfg.snapshot()
@@ -1411,6 +1468,8 @@ def list_themes():
 
 def process_uid(pid):
     """返回进程 uid；进程不存在返回 None。"""
+    if PLATFORM.IS_WINDOWS:
+        return PLATFORM.process_uid(pid)
     out = run_cmd(["ps", "-o", "uid=", "-p", str(int(pid))])
     toks = out.split()
     if not toks:
@@ -1430,7 +1489,9 @@ def kill_process(pid, force):
         return False, "进程不存在"
     if uid != SELF_UID:
         return False, "只能结束当前用户的进程"
-    sig = signal.SIGKILL if force else signal.SIGTERM
+    if PLATFORM.IS_WINDOWS:
+        return PLATFORM.terminate_pid(pid, force)
+    sig = getattr(signal, "SIGKILL", signal.SIGTERM) if force else signal.SIGTERM
     try:
         os.kill(pid, sig)
     except ProcessLookupError:
@@ -1450,6 +1511,9 @@ def stop_pid_tree(pid, sig=signal.SIGTERM):
     failures must never be swallowed: callers use them to retain management
     identity instead of creating an orphan process.
     """
+    if PLATFORM.IS_WINDOWS:
+        return PLATFORM.terminate_process_group(
+            pid, force=(sig == getattr(signal, "SIGKILL", object())))
     try:
         os.killpg(int(pid), sig)
         return True, None
@@ -1478,27 +1542,60 @@ def build_launch_env(token, environ=None):
     """
     env = dict(os.environ if environ is None else environ)
     home = os.path.expanduser("~")
-    preferred = [
-        os.path.join(home, ".local", "bin"),
-        os.path.join(home, ".volta", "bin"),
-        os.path.join(home, ".bun", "bin"),
-        os.path.join(home, "Library", "pnpm"),
-        os.path.join(home, ".asdf", "shims"),
-        "/opt/homebrew/bin", "/opt/homebrew/sbin",
-        "/usr/local/bin", "/usr/local/sbin",
-    ]
-    preferred.extend(sorted(
-        glob.glob(os.path.join(home, ".nvm", "versions", "node", "*", "bin")),
-        reverse=True))
-    preferred.extend(sorted(
-        glob.glob(os.path.join(home, ".fnm", "node-versions", "*", "installation", "bin")),
-        reverse=True))
-    preferred.extend((env.get("PATH") or "").split(os.pathsep))
-    preferred.extend(("/usr/bin", "/bin", "/usr/sbin", "/sbin"))
+    if PLATFORM.IS_WINDOWS:
+        python_dir = os.path.dirname(os.path.abspath(sys.executable))
+        preferred = [
+            python_dir,
+            os.path.join(python_dir, "Scripts"),
+            os.path.join(home, "AppData", "Roaming", "npm"),
+            os.path.join(home, ".volta", "bin"),
+            os.path.join(home, ".bun", "bin"),
+            os.path.join(home, ".local", "bin"),
+        ]
+        preferred.extend(sorted(
+            glob.glob(os.path.join(home, ".fnm", "node-versions", "*", "installation")),
+            reverse=True))
+        preferred.extend(sorted(
+            glob.glob(os.path.join(home, "scoop", "apps", "*", "current", "bin")),
+            reverse=True))
+    else:
+        preferred = [
+            os.path.join(home, ".local", "bin"),
+            os.path.join(home, ".volta", "bin"),
+            os.path.join(home, ".bun", "bin"),
+            os.path.join(home, "Library", "pnpm"),
+            os.path.join(home, ".asdf", "shims"),
+            "/opt/homebrew/bin", "/opt/homebrew/sbin",
+            "/usr/local/bin", "/usr/local/sbin",
+        ]
+        preferred.extend(sorted(
+            glob.glob(os.path.join(home, ".nvm", "versions", "node", "*", "bin")),
+            reverse=True))
+        preferred.extend(sorted(
+            glob.glob(os.path.join(home, ".fnm", "node-versions", "*", "installation", "bin")),
+            reverse=True))
+    current_path = env.get("PATH")
+    if PLATFORM.IS_WINDOWS and not current_path:
+        current_path = next(
+            (value for key, value in env.items()
+             if key.casefold() == "path"), "")
+    preferred.extend((current_path or "").split(os.pathsep))
+    if not PLATFORM.IS_WINDOWS:
+        preferred.extend(("/usr/bin", "/bin", "/usr/sbin", "/sbin"))
+    else:
+        preferred.append(os.path.join(home, "AppData", "Local", "Microsoft",
+                                      "WindowsApps"))
     seen = set()
+    if PLATFORM.IS_WINDOWS:
+        for key in list(env):
+            if key != "PATH" and key.casefold() == "path":
+                del env[key]
     env["PATH"] = os.pathsep.join(
         path for path in preferred if path and not (path in seen or seen.add(path)))
-    env.setdefault("PNPM_HOME", os.path.join(home, "Library", "pnpm"))
+    if PLATFORM.IS_WINDOWS:
+        env.setdefault("PNPM_HOME", os.path.join(home, "AppData", "Local", "pnpm"))
+    else:
+        env.setdefault("PNPM_HOME", os.path.join(home, "Library", "pnpm"))
     env[RUN_TOKEN_ENV] = token
     return env
 
@@ -1512,30 +1609,54 @@ def start_app(app):
     try:
         log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND,
                          0o600)
-        os.fchmod(log_fd, 0o600)
+        if not PLATFORM.IS_WINDOWS and hasattr(os, "fchmod"):
+            os.fchmod(log_fd, 0o600)
         logf = os.fdopen(log_fd, "ab", buffering=0)
     except OSError as e:
         return False, "无法打开日志文件: %s" % e, None, None, None
     token = secrets.token_urlsafe(24)
     env = build_launch_env(token)
     marker = RUN_TOKEN_ARG_PREFIX + token
-    # 外层 shell 在 argv[0] 中持有随机标记并等待内层；内层等待用户命令
-    # 留下的后台作业。因此进程组既可验证，也不会因启动脚本过早退出而失去锚点。
-    outer_script = '/bin/bash -c "$1"\nconsole_status=$?\nexit "$console_status"'
-    inner_script = (app["command"] +
-                    '\nconsole_status=$?\nwait\nexit "$console_status"')
+    wrapper_path = None
     try:
         header = "\n===== 启动于 %s =====\n" % time.strftime("%Y-%m-%d %H:%M:%S")
         logf.write(header.encode("utf-8"))
-        proc = subprocess.Popen(
-            ["/bin/bash", "-c", outer_script, marker, inner_script],
-            cwd=cwd, stdout=logf, stderr=subprocess.STDOUT,
-            start_new_session=True, env=env)
+        if PLATFORM.IS_WINDOWS:
+            wrapper_path = os.path.join(
+                tempfile.gettempdir(),
+                ".console-run-%s-%s.cmd" % (app["id"], token))
+            command = PLATFORM.windows_compat_command(app["command"])
+            PLATFORM.write_command_wrapper(
+                wrapper_path, command, token)
+            proc = subprocess.Popen(
+                PLATFORM.shell_command(command, token, wrapper_path),
+                cwd=cwd, stdout=logf, stderr=subprocess.STDOUT,
+                env=env, creationflags=PLATFORM.process_creation_flags())
+            PLATFORM.register_command_wrapper(proc.pid, wrapper_path)
+            pgid = PLATFORM.register_process_group(proc.pid, proc)
+            if pgid is None:
+                pgid = proc.pid
+        else:
+            # 外层 shell 在 argv[0] 中持有随机标记并等待内层；内层等待用户命令
+            # 留下的后台作业。因此进程组既可验证，也不会因启动脚本过早退出而失去锚点。
+            outer_script = '/bin/bash -c "$1"\nconsole_status=$?\nexit "$console_status"'
+            inner_script = (app["command"] +
+                            '\nconsole_status=$?\nwait\nexit "$console_status"')
+            proc = subprocess.Popen(
+                ["/bin/bash", "-c", outer_script, marker, inner_script],
+                cwd=cwd, stdout=logf, stderr=subprocess.STDOUT,
+                start_new_session=True, env=env)
+            pgid = proc.pid
     except Exception as e:
+        if wrapper_path:
+            try:
+                os.remove(wrapper_path)
+            except OSError:
+                pass
         logf.close()
         return False, "启动失败: %s" % e, None, None, None
     logf.close()  # 子进程已持有副本，父进程关闭避免 fd 泄漏
-    return True, None, proc, proc.pid, token
+    return True, None, proc, pgid, token
 
 
 def startup_failure_message(app_id, code):
@@ -1558,6 +1679,9 @@ def watch_app_exit(cfg, app_id, proc, token, started_at=None):
 
     def _wait():
         code = proc.wait()
+        if PLATFORM.IS_WINDOWS:
+            PLATFORM.release_command_wrapper(proc.pid)
+            PLATFORM.release_process_group(proc.pid)
         ended_at = time.time()
         duration = round(max(0.0, ended_at - started_at), 3)
 
@@ -1634,7 +1758,32 @@ def stop_app_for_update(cfg, app, timeout=5.0):
 
 
 def pick_path(what):
-    """macOS 原生文件/目录选择框（osascript）。返回 (path|None, canceled)。"""
+    """Return a native file/directory selection result."""
+    if PLATFORM.IS_WINDOWS:
+        # Windows PowerShell's WinForms picker is available on supported
+        # desktop installations without adding a GUI dependency to Python.
+        if what == "dir":
+            script = (
+                "Add-Type -AssemblyName System.Windows.Forms; "
+                "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
+                "if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }")
+        else:
+            script = (
+                "Add-Type -AssemblyName System.Windows.Forms; "
+                "$d = New-Object System.Windows.Forms.OpenFileDialog; "
+                "$d.Filter = 'Scripts|*.py;*.ps1;*.cmd;*.bat;*.sh|All files|*.*'; "
+                "if ($d.ShowDialog() -eq 'OK') { $d.FileName }")
+        try:
+            r = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-STA", "-Command", script],
+                capture_output=True, text=True, timeout=180,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, subprocess.TimeoutExpired):
+            return None, False
+        if r.returncode != 0:
+            return None, False
+        value = (r.stdout or "").strip()
+        return value or None, not bool(value)
     if what == "dir":
         script = 'POSIX path of (choose folder with prompt "选择工作目录")'
     else:
@@ -1652,6 +1801,19 @@ def pick_path(what):
 def command_for_script(path):
     """按脚本类型生成可直接保存的 shell 命令，并安全引用任意文件名。"""
     normalized = os.path.abspath(os.path.expanduser(str(path)))
+    if PLATFORM.IS_WINDOWS:
+        quoted = subprocess.list2cmdline([normalized])
+        suffix = os.path.splitext(normalized)[1].lower()
+        if suffix == ".py":
+            return "%s -- %s" % (
+                subprocess.list2cmdline([sys.executable]), quoted)
+        if suffix == ".ps1":
+            return "powershell -NoProfile -ExecutionPolicy Bypass -File %s" % quoted
+        if suffix in (".cmd", ".bat"):
+            return quoted
+        if suffix in (".sh", ".bash"):
+            return "bash %s" % quoted
+        return quoted
     quoted = shlex.quote(normalized)
     suffix = os.path.splitext(normalized)[1].lower()
     if suffix == ".py":
@@ -1666,7 +1828,9 @@ def command_for_script(path):
     return "/bin/bash -- %s" % quoted
 
 
-SCRIPT_SUFFIXES = {".py", ".sh", ".bash", ".zsh", ".command"}
+SCRIPT_SUFFIXES = {
+    ".py", ".sh", ".bash", ".zsh", ".command", ".ps1", ".cmd", ".bat",
+}
 SHELL_BUILTINS = {
     ".", ":", "[", "alias", "break", "cd", "command", "continue", "echo",
     "eval", "exec", "exit", "export", "false", "printf", "pwd", "read",
@@ -1681,10 +1845,18 @@ def _simple_command_tokens(command):
         return []
     try:
         lexer = shlex.shlex(
-            command, posix=True, punctuation_chars="|&;<>()")
+            command, posix=not PLATFORM.IS_WINDOWS,
+            punctuation_chars="|&;<>()")
         lexer.whitespace_split = True
         lexer.commenters = ""
         tokens = list(lexer)
+        if PLATFORM.IS_WINDOWS:
+            tokens = [
+                token[1:-1]
+                if len(token) >= 2 and token[0] == token[-1]
+                and token[0] in "\"'" else token
+                for token in tokens
+            ]
     except ValueError:
         return None
     if not tokens:
@@ -1720,19 +1892,24 @@ def _script_target(tokens, cwd):
     base = os.path.basename(executable)
     args = tokens[index + 1:]
 
-    if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", base):
+    python_names = ("python", "python3", "python.exe", "python3.exe",
+                    "py", "py.exe")
+    if (base.casefold() in python_names or
+            re.fullmatch(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?", base,
+                         re.I)):
         if "-m" in args or "-c" in args:
             return None, False, False
         if args and args[0] == "--":
             args = args[1:]
         candidate = next((arg for arg in args if not arg.startswith("-")), None)
         if candidate and (os.path.splitext(candidate)[1].lower() in SCRIPT_SUFFIXES
-                          or "/" in candidate):
+                          or "/" in candidate or "\\" in candidate):
             return (_resolve_command_path(candidate, cwd), False,
                     not os.path.isabs(os.path.expanduser(candidate)))
         return None, False, False
 
-    if base in {"bash", "sh", "zsh"}:
+    shell_names = {"bash", "sh", "zsh", "bash.exe", "sh.exe"}
+    if base.casefold() in shell_names:
         if any(arg == "--command"
                or (arg.startswith("-") and "c" in arg[1:])
                for arg in args):
@@ -1741,13 +1918,26 @@ def _script_target(tokens, cwd):
             args = args[1:]
         candidate = next((arg for arg in args if not arg.startswith("-")), None)
         if candidate and (os.path.splitext(candidate)[1].lower() in SCRIPT_SUFFIXES
-                          or "/" in candidate):
+                          or "/" in candidate or "\\" in candidate):
+            return (_resolve_command_path(candidate, cwd), False,
+                    not os.path.isabs(os.path.expanduser(candidate)))
+        return None, False, False
+
+    if base.casefold() in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+        try:
+            file_index = next(index for index, arg in enumerate(args)
+                              if arg.casefold() in ("-file", "-f"))
+        except StopIteration:
+            return None, False, False
+        candidate = args[file_index + 1] if file_index + 1 < len(args) else None
+        if candidate and (os.path.splitext(candidate)[1].lower() in SCRIPT_SUFFIXES
+                          or "/" in candidate or "\\" in candidate):
             return (_resolve_command_path(candidate, cwd), False,
                     not os.path.isabs(os.path.expanduser(candidate)))
         return None, False, False
 
     suffix = os.path.splitext(executable)[1].lower()
-    if suffix in SCRIPT_SUFFIXES or "/" in executable:
+    if suffix in SCRIPT_SUFFIXES or "/" in executable or "\\" in executable:
         return (_resolve_command_path(executable, cwd), True,
                 not os.path.isabs(os.path.expanduser(executable)))
     return None, False, False
@@ -1802,7 +1992,8 @@ def inspect_app_health(app):
                 "检查脚本权限，或重新选择一个可读取的脚本。",
                 "pick-script",
             )
-        elif direct and not os.access(script_path, os.X_OK):
+        elif direct and not PLATFORM.IS_WINDOWS and not os.access(
+                script_path, os.X_OK):
             add(
                 "script-not-executable", "脚本不可执行",
                 "直接运行的脚本没有执行权限：%s" % script_path,
@@ -1816,15 +2007,22 @@ def inspect_app_health(app):
             r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[index]):
         index += 1
     executable = tokens[index] if tokens and index < len(tokens) else ""
-    executable_base = os.path.basename(executable)
+    executable_base = os.path.basename(executable).casefold()
+    executable_name = executable_base
+    if PLATFORM.IS_WINDOWS and executable_name in {
+            "python3", "python3.exe", "python.exe", "py", "py.exe"}:
+        executable_name = "python"
+    if PLATFORM.IS_WINDOWS:
+        executable_name = executable_name.strip('"').casefold()
     if executable and not direct and executable_base not in SHELL_BUILTINS:
-        if "/" in executable:
+        if "/" in executable or "\\" in executable:
             runtime = _resolve_command_path(executable, cwd)
-            runtime_ok = os.path.isfile(runtime) and os.access(runtime, os.X_OK)
+            runtime_ok = os.path.isfile(runtime) and (
+                PLATFORM.IS_WINDOWS or os.access(runtime, os.X_OK))
         else:
-            runtime = executable
+            runtime = executable_name
             runtime_ok = bool(shutil.which(
-                executable, path=build_launch_env("health-check").get("PATH")))
+                executable_name, path=build_launch_env("health-check").get("PATH")))
         if not runtime_ok:
             add(
                 "runtime-missing", "找不到 %s" % executable_base,
@@ -1985,7 +2183,9 @@ def detect_project(root):
             if is_hexo and str(name).lower() == "server" and re.search(
                     r"\bhexo\s+(?:s|server)\b", script, re.I):
                 continue  # 下方提供更短、更通用的 hexo s，不重复同一操作
-            command = "%s %s" % (runner, shlex.quote(str(name)))
+            command = "%s %s" % (
+                runner, shlex.quote(str(name)) if not PLATFORM.IS_WINDOWS
+                else subprocess.list2cmdline([str(name)]))
             port = _port_from_command(script)
             if port is None:
                 port = _package_default_port(str(name).lower(), script, deps)
@@ -2027,12 +2227,14 @@ def detect_project(root):
     if requirements is not None:
         note_file("requirements.txt", requirements)
     py_deps = "\n".join(text for text in (pyproject, requirements) if text).lower()
-    python_runner = "uv run" if os.path.isfile(os.path.join(root, "uv.lock")) else "python3 -m"
+    python_runner = "uv run" if os.path.isfile(os.path.join(root, "uv.lock")) else (
+        "python -m" if PLATFORM.IS_WINDOWS else "python3 -m")
     if os.path.isfile(os.path.join(root, "uv.lock")):
         note_file("uv.lock")
     if os.path.isfile(os.path.join(root, "manage.py")):
         note_file("manage.py")
-        prefix = "uv run python" if python_runner == "uv run" else "python3"
+        prefix = "uv run python" if python_runner == "uv run" else (
+            "python" if PLATFORM.IS_WINDOWS else "python3")
         add(prefix + " manage.py runserver", "Django 开发服务器", "manage.py", 8000, 20)
     else:
         for module_file in ("app.py", "main.py", "server.py"):
@@ -2048,19 +2250,22 @@ def detect_project(root):
                 r"(?m)^\s*(?:import\s+flask\b|from\s+flask\b)", module_text)
             if "streamlit" in py_deps or imports_streamlit:
                 note_file(module_file, module_text)
-                prefix = "uv run" if python_runner == "uv run" else "python3 -m"
+                prefix = "uv run" if python_runner == "uv run" else (
+                    "python -m" if PLATFORM.IS_WINDOWS else "python3 -m")
                 add(prefix + " streamlit run " + module_file,
                     "Streamlit 应用", module_file, 8501, 22)
                 break
             if "fastapi" in py_deps or imports_fastapi:
                 note_file(module_file, module_text)
-                prefix = "uv run" if python_runner == "uv run" else "python3 -m"
+                prefix = "uv run" if python_runner == "uv run" else (
+                    "python -m" if PLATFORM.IS_WINDOWS else "python3 -m")
                 add(prefix + " uvicorn %s:app --reload" % module,
                     "FastAPI 开发服务器", module_file, 8000, 23)
                 break
             if "flask" in py_deps or imports_flask:
                 note_file(module_file, module_text)
-                prefix = "uv run" if python_runner == "uv run" else "python3 -m"
+                prefix = "uv run" if python_runner == "uv run" else (
+                    "python -m" if PLATFORM.IS_WINDOWS else "python3 -m")
                 add(prefix + " flask --app %s run --debug" % module,
                     "Flask 开发服务器", module_file, 5000, 24)
                 break
@@ -2085,10 +2290,21 @@ def detect_project(root):
         note_file("Cargo.toml")
         add("cargo run", "Rust 项目", "Cargo.toml", None, 61)
 
-    for script_name in ("start.command", "dev.command", "run.command", "start.sh", "dev.sh", "run.sh"):
+    script_names = ("start.command", "dev.command", "run.command", "start.sh",
+                    "dev.sh", "run.sh")
+    if PLATFORM.IS_WINDOWS:
+        script_names = ("start.cmd", "dev.cmd", "run.cmd", "start.bat",
+                        "dev.bat", "run.bat", "start.ps1", "dev.ps1",
+                        "run.ps1") + script_names
+    for script_name in script_names:
         if os.path.isfile(os.path.join(root, script_name)):
             note_file(script_name)
-            add("bash %s" % shlex.quote("./" + script_name),
+            if PLATFORM.IS_WINDOWS:
+                command = subprocess.list2cmdline([
+                    os.path.join(root, script_name)])
+            else:
+                command = "bash %s" % shlex.quote("./" + script_name)
+            add(command,
                 "现有启动脚本", script_name, None, 70,
                 "也可以继续使用“选择脚本”手动指定")
             break
@@ -2096,7 +2312,9 @@ def detect_project(root):
     # 纯静态站点最后兜底，避免把 Vite/Next 等项目误当成普通文件目录。
     if not candidates and os.path.isfile(os.path.join(root, "index.html")):
         note_file("index.html")
-        add("python3 -m http.server 8000", "静态网站预览", "index.html", 8000, 90)
+        python_command = "python -m http.server 8000" if PLATFORM.IS_WINDOWS \
+            else "python3 -m http.server 8000"
+        add(python_command, "静态网站预览", "index.html", 8000, 90)
 
     candidates.sort(key=lambda item: item.pop("_priority"))
     return {
@@ -2115,7 +2333,10 @@ def _current_user_group_members(pgid):
     that ignores SIGTERM.  Requiring the marker again would incorrectly report
     success, so the wait phase follows the already-verified PGID until empty.
     """
-    members = pgid_members_map().get(pgid, [])
+    if PLATFORM.IS_WINDOWS:
+        members = PLATFORM.process_group_members(pgid)
+    else:
+        members = pgid_members_map().get(pgid, [])
     if not members:
         return []
     snap = ps_snapshot(members, with_uid=True)
@@ -2134,11 +2355,18 @@ def resolve_app_stop_target(app, listeners=None):
     legacy_pid = legacy_managed_pid(app, listeners)
     if legacy_pid:
         if app.get("attached"):
-            try:
-                pgid = os.getpgid(legacy_pid)
-            except (ProcessLookupError, PermissionError, OSError):
-                pgid = None
-            if isinstance(pgid, int) and pgid > 0 and pgid != os.getpgrp():
+            if PLATFORM.IS_WINDOWS:
+                # An attached process has no Job Object from this console,
+                # but a validated same-user/same-cwd process tree can still
+                # be stopped as a bounded taskkill /T target.
+                pgid = legacy_pid
+            else:
+                try:
+                    pgid = os.getpgid(legacy_pid)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pgid = None
+            if (isinstance(pgid, int) and pgid > 0 and
+                    (PLATFORM.IS_WINDOWS or pgid != os.getpgrp())):
                 members = _current_user_group_members(pgid)
                 member_cwds = lsof_cwds(members)
                 expected_cwd = app.get("cwd")
@@ -2166,6 +2394,9 @@ def signal_app_stop(target, sig=signal.SIGTERM):
     ident = target["id"]
     if target["kind"] == "group":
         return stop_pid_tree(ident, sig)
+    if PLATFORM.IS_WINDOWS:
+        return PLATFORM.terminate_pid(
+            ident, force=(sig == getattr(signal, "SIGKILL", object())))
     try:
         os.kill(ident, sig)
         return True, None
@@ -2179,6 +2410,8 @@ def signal_app_stop(target, sig=signal.SIGTERM):
 
 def stop_target_alive(target, expected_uid=None):
     if target["kind"] == "group":
+        if PLATFORM.IS_WINDOWS:
+            return bool(PLATFORM.process_group_members(target["id"]))
         try:
             os.killpg(target["id"], 0)
             return True
@@ -2188,6 +2421,12 @@ def stop_target_alive(target, expected_uid=None):
             return True
         except OSError:
             return True
+    if PLATFORM.IS_WINDOWS:
+        if not PLATFORM.pid_alive(target["id"]):
+            return False
+        if expected_uid is None:
+            expected_uid = process_uid(target["id"])
+        return expected_uid == SELF_UID
     try:
         os.kill(target["id"], 0)
         if expected_uid is None:
@@ -2204,9 +2443,10 @@ def stop_target_alive(target, expected_uid=None):
 def stop_app_and_wait(app, timeout=APP_STOP_TIMEOUT_SEC, listeners=None):
     """Signal a verified app and wait until the exact target is gone.
 
-    Returns (ok, error).  A timeout is deliberately not escalated to SIGKILL;
-    the caller keeps the runtime token so the user can retry or choose a force
-    action without losing control of a still-live process.
+    Returns (ok, error).  Windows may escalate a previously verified process
+    tree to Job Object termination because ``taskkill /T`` cannot always close
+    console descendants gracefully.  POSIX keeps the original no-escalation
+    behavior.
     """
     target, error = resolve_app_stop_target(app, listeners)
     if target is None:
@@ -2221,12 +2461,35 @@ def stop_app_and_wait(app, timeout=APP_STOP_TIMEOUT_SEC, listeners=None):
                     else None)
     while stop_target_alive(target, expected_uid):
         if time.monotonic() >= deadline:
+            if PLATFORM.IS_WINDOWS and target["kind"] == "group":
+                forced, force_error = PLATFORM.terminate_process_group(
+                    target["id"], force=True)
+                if forced:
+                    force_deadline = time.monotonic() + 2.0
+                    while (stop_target_alive(target, expected_uid) and
+                           time.monotonic() < force_deadline):
+                        time.sleep(0.05)
+                    if not stop_target_alive(target, expected_uid):
+                        return True, None
+                if force_error:
+                    error = force_error
             remaining = (target["members"] if target["kind"] == "pid"
                          else _current_user_group_members(target["id"]))
             suffix = "（PID %s）" % "、".join(str(p) for p in remaining) if remaining else ""
             return False, "应用未在 %.1f 秒内退出%s，仍保留管理状态" % (timeout, suffix)
         time.sleep(0.05)
     return True, None
+
+
+def release_windows_start_resources(proc, pgid):
+    """Release Windows-only startup handles and temporary command wrappers."""
+    if not PLATFORM.IS_WINDOWS:
+        return
+    root_pid = proc.pid if proc is not None else pgid
+    if root_pid is not None:
+        PLATFORM.release_command_wrapper(root_pid)
+    if pgid is not None:
+        PLATFORM.release_process_group(pgid)
 
 
 def stop_app_and_clear(cfg, app, timeout=APP_STOP_TIMEOUT_SEC, listeners=None):
@@ -2273,7 +2536,8 @@ def inspect_attach_process(cfg, app, pid):
     if (pid, port) not in listeners:
         return False, "PID %d 并未监听端口 %d，进程可能已退出" % (pid, port), {"status": 409}
     snap = ps_snapshot({pid}, with_uid=True)
-    if snap.get(pid, {}).get("uid") != SELF_UID:
+    owner = snap.get(pid, {}).get("uid") or process_uid(pid)
+    if owner != SELF_UID:
         return False, "该进程不属于当前用户，不能认领", {"status": 403}
     cfg_now = cfg.snapshot()
     owners = listener_app_owners(cfg_now.get("apps") or [], listeners, snap, None)
@@ -3493,6 +3757,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not persist_started_app(self.server.cfg, app_id, proc, pgid, token):
             stop_pid_tree(pgid)
+            release_windows_start_resources(proc, pgid)
             self.send_json({"ok": False, "error": "应用已被删除，已取消启动"}, 409)
             return
         # 一次性任务的正常形态就是快速退出，不能沿用服务的启动探测逻辑把
@@ -3590,6 +3855,7 @@ class Handler(BaseHTTPRequestHandler):
         if not persist_started_app(
                 self.server.cfg, app_id, proc, pgid, new_token):
             stop_pid_tree(pgid)
+            release_windows_start_resources(proc, pgid)
             self.send_err(409, "应用已被删除，已取消重启")
             return
         self.send_json({"ok": True, "pid": proc.pid})
@@ -3876,6 +4142,13 @@ end run"""
 
 def launcher_main():
     """start.command 的无命令启动入口。"""
+    if PLATFORM.IS_WINDOWS:
+        # Windows has no Finder/osascript launcher bundle.  The .cmd entry
+        # point already provides the desktop-friendly behavior: reuse the
+        # existing browser session when possible, otherwise start the local
+        # console and write its output under LocalAppData.
+        main(log_to_file=True)
+        return
     instances = find_console_instances()
     if not instances:
         try:
@@ -3926,10 +4199,12 @@ def launcher_main():
 
 def schedule_console_restart(server, preferred_port):
     """启动独立 helper，响应发出后关闭当前 HTTP 服务。"""
+    creationflags = PLATFORM.process_creation_flags()
     helper = subprocess.Popen(
         [sys.executable, os.path.abspath(__file__), "--restart-helper",
          str(SELF_PID), str(int(preferred_port))],
-        cwd=BASE_DIR, start_new_session=True, close_fds=True)
+        cwd=BASE_DIR, start_new_session=not PLATFORM.IS_WINDOWS,
+        close_fds=True, creationflags=creationflags)
 
     def _shutdown():
         time.sleep(0.25)
@@ -4002,7 +4277,8 @@ def redirect_console_output():
     path = os.path.join(LOGS_DIR, "console.log")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
-        os.fchmod(fd, 0o600)
+        if not PLATFORM.IS_WINDOWS and hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
         for stream in (sys.stdout, sys.stderr):
             try:
                 stream.flush()
@@ -4010,6 +4286,13 @@ def redirect_console_output():
                 pass
         os.dup2(fd, 1)
         os.dup2(fd, 2)
+        if PLATFORM.IS_WINDOWS:
+            # Text streams opened by the Windows CRT otherwise translate
+            # ``\n`` once more after stdout/stderr have been redirected to a
+            # binary fd. Keep the log format identical across platforms.
+            import msvcrt
+            msvcrt.setmode(1, os.O_BINARY)
+            msvcrt.setmode(2, os.O_BINARY)
     finally:
         os.close(fd)
     for stream in (sys.stdout, sys.stderr):

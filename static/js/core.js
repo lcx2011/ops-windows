@@ -45,7 +45,11 @@ export function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
-export function shortHome(p) { return p ? p.replace(/^\/Users\/[^/]+/, '~') : ''; }
+export function shortHome(p) {
+  if (!p) return '';
+  return p.replace(/^\/Users\/[^/]+/, '~')
+    .replace(/^[A-Za-z]:\\Users\\[^\\]+/i, '~');
+}
 export function truncateMiddle(s, max = 34) {
   if (!s) return '';
   if (s.length <= max) return s;
@@ -518,4 +522,3 @@ export function applyUiTheme(name, persist = false) {
   });
   return queued;
 }
-

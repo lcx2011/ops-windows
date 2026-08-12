@@ -1,0 +1,2 @@
+# Optional but recommended for Windows process, port and working-directory inspection.
+psutil==7.0.0
