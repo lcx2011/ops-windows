@@ -438,6 +438,37 @@ class ProcessLifecycleHardeningTests(unittest.TestCase):
                     except OSError:
                         pass
 
+    def test_state_snapshot_remains_available_after_manual_stop(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(server, "LOGS_DIR", td):
+            base = {**server.Config.APP_DEFAULT, "id": "deadbeef",
+                    "name": "Service", "command": long_running_command(),
+                    "cwd": td}
+            cfg = self._config_with_app(td, base)
+            ok, error, proc, pgid, token = server.start_app(base)
+            self.assertTrue(ok, error)
+            server.persist_started_app(cfg, base["id"], proc, pgid, token)
+            try:
+                time.sleep(0.15)
+                tracked = server.find_app(cfg.snapshot(), base["id"])
+                stopped, error = server.stop_app_and_clear(
+                    cfg, tracked, timeout=2)
+                self.assertTrue(stopped, error)
+                started = time.perf_counter()
+                snapshot = server.get_state_snapshot(
+                    cfg, 9600, "post-stop-state-test")
+                self.assertLess(time.perf_counter() - started, 2)
+                app = next(item for item in snapshot["apps"]
+                           if item["id"] == base["id"])
+                self.assertFalse(app["running"])
+            finally:
+                if server.stop_target_alive(
+                        {"kind": "group", "id": pgid, "members": [proc.pid]}):
+                    try:
+                        force_stop_group(pgid)
+                    except OSError:
+                        pass
+
     def test_manual_task_stop_replaces_old_success_with_stopped_result(self):
         with tempfile.TemporaryDirectory() as td, \
                 mock.patch.object(server, "LOGS_DIR", td):

@@ -898,6 +898,38 @@ class LaunchEnvironmentTests(unittest.TestCase):
 
 
 class StateTests(unittest.TestCase):
+    def test_state_cache_does_not_hold_cache_lock_while_building(self):
+        cfg = mock.Mock()
+        cfg.snapshot.side_effect = lambda: {"apps": []}
+        cfg.health_info.return_value = {}
+        entered = threading.Event()
+        release = threading.Event()
+
+        def build(*args):
+            entered.set()
+            self.assertTrue(release.wait(2))
+            return {"consolePort": 9600, "consolePid": server.SELF_PID,
+                    "consoleInstanceId": "cache-lock-test"}
+
+        with mock.patch.object(server, "build_state", side_effect=build):
+            result = {}
+            worker = threading.Thread(
+                target=lambda: result.setdefault(
+                    "state", server.get_state_snapshot(
+                        cfg, 9600, "cache-lock-test")))
+            worker.start()
+            self.assertTrue(entered.wait(1))
+
+            # Config.update() invalidates the cache while holding Config's
+            # lock. It must not wait on a cache lock held by build_state().
+            server.invalidate_state_cache()
+            release.set()
+            worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result["state"]["consoleInstanceId"],
+                         "cache-lock-test")
+
     def test_app_and_service_expose_ipv6_aware_open_host(self):
         app = {**server.Config.APP_DEFAULT, "id": "vite", "name": "公众号排版",
                "command": "npm run dev", "cwd": "/tmp/vite", "port": 5173}

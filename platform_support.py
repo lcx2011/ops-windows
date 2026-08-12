@@ -108,6 +108,8 @@ def _user_identity(pid):
 
 
 _CURRENT_USER_NAME = None
+_PROCESS_METRIC_CACHE = {}
+_PROCESS_METRIC_LOCK = threading.RLock()
 
 
 def _cached_current_user_name():
@@ -366,7 +368,7 @@ def _add_process_metrics(snapshot, pids):
     for pid in {int(value) for value in pids}:
         if pid not in snapshot:
             continue
-        process = _psutil_process(pid)
+        process = _metric_process(pid)
         if process is None:
             continue
         try:
@@ -377,6 +379,34 @@ def _add_process_metrics(snapshot, pids):
             snapshot[pid]["mem"] = float(process.memory_percent())
         except (OSError, psutil.Error):
             pass
+
+
+def _metric_process(pid):
+    """Return a persistent psutil process object for CPU sampling.
+
+    ``Process.cpu_percent(interval=None)`` needs two observations on the same
+    object. Recreating ``psutil.Process(pid)`` on every state poll resets that
+    baseline and makes Windows CPU values stay at 0. A creation-time check
+    prevents a reused PID from inheriting the previous process's baseline.
+    """
+    if psutil is None:
+        return None
+    pid = int(pid)
+    process = _psutil_process(pid)
+    if process is None:
+        with _PROCESS_METRIC_LOCK:
+            _PROCESS_METRIC_CACHE.pop(pid, None)
+        return None
+    try:
+        created = process.create_time()
+    except (OSError, psutil.Error):
+        created = None
+    with _PROCESS_METRIC_LOCK:
+        cached = _PROCESS_METRIC_CACHE.get(pid)
+        if cached is not None and cached[1] == created:
+            return cached[0]
+        _PROCESS_METRIC_CACHE[pid] = (process, created)
+        return process
 
 
 def process_metrics(pids):

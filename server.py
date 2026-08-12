@@ -1055,6 +1055,13 @@ def build_watched(keywords):
                        "uptimeSec": info["etime"],
                        # keyword 保留给旧前端，keywords 提供无损结构化数据。
                        "keyword": "、".join(matched), "keywords": matched})
+    if PLATFORM.IS_WINDOWS and result:
+        # The full Windows process snapshot is intentionally cheap and does
+        # not sample every process. Once keyword matching has narrowed the
+        # list, sample only the rows that will be shown in the UI.
+        metrics = PLATFORM.process_metrics(item["pid"] for item in result)
+        for item in result:
+            item.update(metrics.get(item["pid"], {}))
     return result
 
 
@@ -1367,27 +1374,49 @@ def build_state(cfg, console_port, config_health=None, console_instance_id=None)
 # 第二个请求直接命中缓存）。配置/进程变更时 invalidate 立即失效。
 STATE_CACHE_TTL = 2.2  # 秒
 _state_cache_lock = threading.Lock()
+_state_build_lock = threading.Lock()
+_state_cache_generation = 0
 _state_cache = {"mono": 0.0, "state": None}
 
 
 def invalidate_state_cache():
+    global _state_cache_generation
     with _state_cache_lock:
+        _state_cache_generation += 1
         _state_cache["state"] = None
 
 
 def get_state_snapshot(cfg, console_port, console_instance_id=None):
-    now = time.monotonic()
-    with _state_cache_lock:
-        cached = _state_cache["state"]
-        same_console = cached is not None
-        if console_instance_id is not None:
-            same_console = same_console and (
-                cached.get("consolePort") == console_port
-                and cached.get("consolePid") == SELF_PID
-                and cached.get("consoleInstanceId") == console_instance_id
-            )
-        if (same_console and now - _state_cache["mono"] < STATE_CACHE_TTL):
+    def cached_state():
+        now = time.monotonic()
+        with _state_cache_lock:
+            cached = _state_cache["state"]
+            same_console = cached is not None
+            if console_instance_id is not None:
+                same_console = same_console and (
+                    cached.get("consolePort") == console_port
+                    and cached.get("consolePid") == SELF_PID
+                    and cached.get("consoleInstanceId") == console_instance_id
+                )
+            if (same_console and
+                    now - _state_cache["mono"] < STATE_CACHE_TTL):
+                return cached
+        return None
+
+    cached = cached_state()
+    if cached is not None:
+        return cached
+
+    # Only one request builds a fresh snapshot at a time, but never hold the
+    # cache lock while reading Config. Config.update() invalidates this cache
+    # while holding the config lock; keeping the old lock order here caused a
+    # Windows-only deadlock between a poll and start/stop.
+    with _state_build_lock:
+        cached = cached_state()
+        if cached is not None:
             return cached
+        with _state_cache_lock:
+            build_generation = _state_cache_generation
         if console_instance_id is None:
             # Keep the helper's historical three-argument call shape for
             # embedders and tests that replace build_state with a stub.
@@ -1397,8 +1426,13 @@ def get_state_snapshot(cfg, console_port, console_instance_id=None):
             state = build_state(
                 cfg.snapshot(), console_port, cfg.health_info(),
                 console_instance_id)
-        _state_cache["mono"] = time.monotonic()
-        _state_cache["state"] = state
+        with _state_cache_lock:
+            # A config mutation can invalidate the cache while this snapshot
+            # is being built. Do not put that pre-mutation snapshot back into
+            # the cache after the mutation has completed.
+            if build_generation == _state_cache_generation:
+                _state_cache["mono"] = time.monotonic()
+                _state_cache["state"] = state
         return state
 
 
@@ -3025,7 +3059,8 @@ class ConsoleServer(ThreadingHTTPServer):
         """空闲连接超时 / 客户端中途断开属正常现象，不刷 traceback。"""
         exc_type, exc, _ = sys.exc_info()
         if exc_type and isinstance(exc, (TimeoutError, BrokenPipeError,
-                                         ConnectionResetError)):
+                                         ConnectionResetError,
+                                         ConnectionAbortedError)):
             return
         super().handle_error(request, client_address)
 
@@ -3215,7 +3250,8 @@ class Handler(BaseHTTPRequestHandler):
         if body:
             try:
                 self.wfile.write(body)
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError,
+                    ConnectionAbortedError):
                 pass
 
     def send_json(self, obj, status=200):
@@ -3299,7 +3335,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.serve_icon(path)
                 return
             self.serve_static(path)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError,
+                ConnectionAbortedError):
             pass
         except Exception as e:
             self._handle_request_error("GET", e)
@@ -3443,7 +3480,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.handle_fetch_favicon(app_id)
                     return
             self.send_err(404, "接口不存在")
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError,
+                ConnectionAbortedError):
             pass
         except Exception as e:
             self._handle_request_error("POST", e)
@@ -3686,10 +3724,10 @@ class Handler(BaseHTTPRequestHandler):
             })
         self.send_json(created)
 
-    @serialized_app_operation
     def handle_fetch_favicon(self, app_id):
         """抓取应用有效端口对应站点的 favicon，存为 data/icons/fav-{id}.{ext}。
-        优先级低于用户自定义 icon/glyph，仅作兜底。"""
+        优先级低于用户自定义 icon/glyph，仅作兜底。此操作是后台装饰增强，
+        不能占用应用启停锁，否则用户在启动后立即点击停止会被无关抓取阻塞。"""
         _, app = self._get_app_or_404(app_id)
         if app is None:
             return
@@ -3991,7 +4029,8 @@ class Handler(BaseHTTPRequestHandler):
                 updated = dict(updated)
                 updated["stoppedForUpdate"] = True
             self.send_json(updated)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError,
+                ConnectionAbortedError):
             pass
         except Exception as e:
             self._handle_request_error("PUT", e)
@@ -4018,7 +4057,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.handle_icon_delete(app_id)
                 return
             self.send_err(404, "接口不存在")
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError,
+                ConnectionAbortedError):
             pass
         except Exception as e:
             self._handle_request_error("DELETE", e)
